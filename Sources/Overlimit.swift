@@ -1,6 +1,6 @@
 import Cocoa
 
-// Overlimit — floating usage panel for Claude subscription limits.
+// Overlimit — плавающая плашка с лимитами Claude.
 // Читает ~/.overlimit/usage-log.csv (пишется launchd-агентом раз в 5 мин).
 
 struct Sample {
@@ -191,6 +191,7 @@ enum Cfg {
     static func show(_ key: String) -> Bool {
         d.object(forKey: key) == nil ? true : d.bool(forKey: key)
     }
+    static var statusBar: Bool { d.object(forKey: "statusBar") == nil ? true : d.bool(forKey: "statusBar") }
     static var lang: String { d.string(forKey: "lang") ?? "system" }
     static var collapsed: Bool { d.bool(forKey: "collapsed") }
     static var collapsedRow: String { d.string(forKey: "collapsedRow") ?? "session" }
@@ -276,8 +277,11 @@ final class PanelView: NSView {
     // Настройки и помощь — правее кружков, теми же размерами.
     func tools() -> [NSRect] {
         guard hovered else { return [] }
+        // Прижаты к правому краю: в macOS левый угол принадлежит только
+        // светофору, служебные кнопки живут справа — и мимо них не промахнёшься
+        // в красный кружок.
         let d: CGFloat = 13, gap: CGFloat = 10
-        var x = bounds.minX + 10 + 12 * 3 + 8 * 2 + 14
+        var x = bounds.maxX - (d * 2 + gap) - 10
         return (0..<2).map { _ -> NSRect in
             defer { x += d + gap }
             return NSRect(x: x, y: (stripH - d) / 2, width: d, height: d)
@@ -368,6 +372,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var panel: PanelView!
     var refreshTimer: Timer?
+    var statusItem: NSStatusItem?
     let label = NSTextField(labelWithString: "…")
     let close = NSButton(title: "×", target: nil, action: nil)
     let claudeBundleID = "com.anthropic.claudefordesktop"
@@ -720,7 +725,37 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return item
     }
 
+    // --- Строка меню macOS ---
+    // Показывает самый напряжённый лимит и открывает то же меню настроек.
+    // Видна всегда, даже когда плашка скрыта или убрана в док.
+    func setupStatusItem() {
+        if Cfg.statusBar {
+            if statusItem == nil {
+                statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            }
+        } else if let si = statusItem {
+            NSStatusBar.system.removeStatusItem(si)
+            statusItem = nil
+        }
+    }
+
+    func updateStatusItem(_ rows: [Row]) {
+        guard let btn = statusItem?.button else { return }
+        statusItem?.menu = buildMenu()
+        guard let worst = rows.max(by: { (100 - $0.percent) > (100 - $1.percent) }) else {
+            btn.title = "—"; return
+        }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        btn.attributedTitle = NSAttributedString(
+            string: "\(worst.tag) \(String(format: "%.0f", worst.percent))%",
+            attributes: [.font: font, .foregroundColor: worst.color])
+    }
+
     @objc func showMenu(_ e: NSEvent) {
+        NSMenu.popUpContextMenu(buildMenu(), with: e, for: window.contentView!)
+    }
+
+    func buildMenu() -> NSMenu {
         let m = NSMenu()
         m.addItem(sub(L("Вид","View"), "mode", [(L("Цифры","Numbers"), "numbers"), (L("Бары","Bars"), "bars")], Cfg.mode,
                       display: Cfg.mode == "bars" ? L("бары","bars") : L("цифры","numbers")))
@@ -745,6 +780,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                 "all": L("все модели","all models"),
                                 "scoped": L("по модели","per model")][Cfg.collapsedRow]
                                ?? L("сессия 5ч","5h session")))
+        m.addItem(sub(L("В строке меню","Menu bar"), "statusBar",
+                      [(L("Показывать","Show"), true), (L("Скрыть","Hide"), false)],
+                      Cfg.statusBar,
+                      display: Cfg.statusBar ? L("показывать","shown") : L("скрыта","hidden")))
         m.addItem(sub(L("Язык","Language"), "lang",
                       [(L("Как в системе","Match system"), "system"),
                        ("Русский", "ru"), ("English", "en")], Cfg.lang,
@@ -810,7 +849,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             it.target = self
             m.addItem(it)
         }
-        NSMenu.popUpContextMenu(m, with: e, for: window.contentView!)
+        return m
     }
 
     // --- Настройки ---
@@ -911,6 +950,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             color: weeklyColor(b), time: fmtLeft(item.1.resets)))
         }
         panel.rows = rows
+        setupStatusItem()
+        updateStatusItem(rows)
 
         // Четвёртой строки нет: цвет строк сам сигнализирует.
         // Исключение — сбор данных встал, об этом молчать нельзя.
