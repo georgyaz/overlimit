@@ -1,14 +1,14 @@
 import Cocoa
 
-// Overlimit — плавающая плашка с лимитами Claude.
-// Читает ~/.overlimit/usage-log.csv (пишется launchd-агентом раз в 5 мин).
+// Overlimit - floating usage panel for Claude subscription limits.
+// Reads ~/.overlimit/usage-log.csv, written by a launchd agent every 5 minutes.
 
 struct Sample {
     let ts: Date
     let kind: String
     let model: String
     let percent: Double
-    let resets: Date?          // пусто, когда окно только что сбросилось
+    let resets: Date?          // empty right after a window rollover
     let active: Bool
     var isWeekly: Bool { kind.hasPrefix("weekly") }
 }
@@ -35,12 +35,12 @@ func loadSamples() -> [Sample] {
     return out
 }
 
-// Светофор для ПЯТИЧАСОВОЙ сессии — по ОСТАТКУ, а не по темпу.
-// Внутри пятичасового окна темп ничего не значит: сэкономленное на потом
-// не переносится, через пять часов всё обнуляется. Важно одно — упрёшься ли
-// в стену. Поэтому «жжёшь быстрее равномерного» здесь не сигнал, а шум.
-// Пороги: жёлтый при остатке <35% (успеть перепланировать),
-// красный при <15% (20% пятичасового окна — это ещё ~40 минут работы).
+// Session row is coloured by REMAINING, not by pace.
+// Inside a five-hour window pace carries no information: nothing you save is
+// carried over and everything resets. The only question is whether you hit
+// the wall, so "burning faster than even pace" here is noise, not a signal.
+// Thresholds: yellow below 35% left (time to replan),
+// red below 15% (20% of a five-hour window is still ~40 minutes of work).
 func sessionColor(_ percent: Double) -> NSColor {
     let left = 100 - percent
     if left < 15 { return Tone.red }
@@ -48,60 +48,60 @@ func sessionColor(_ percent: Double) -> NSColor {
     return Tone.green
 }
 
-// --- Недельные лимиты: суточный бюджет ---
-// Норма — ровно 1/7 окна в день (14.29 п.п.). Одно значение и для цвета,
-// и для потолка, иначе на границе они расходятся.
-// k = бюджет / норма. Метрика самокалибруется: в начале окна остаток 100% и 7 дней
-// впереди дают ровно норму (k=1), поэтому предохранитель на старт недели не нужен.
+// --- Weekly limits: daily budget ---
+// Norm is exactly 1/7 of the window per day (14.29 pp). One value for both
+// colour and ceiling, otherwise they disagree at the boundary.
+// k = budget / norm. Self-calibrating: at window start 100% left across 7 days
+// gives exactly the norm (k=1), so no special-casing for the start of a week.
 let dailyNorm = 100.0 / 7.0
 
 struct Budget {
-    let leftover: Double        // остаток лимита, %
-    let perDay: Double          // сколько можно в сутки
-    let k: Double               // отношение к норме
-    let ceiling: Double         // потолок на сейчас: 100 − норма × дни до сброса
+    let leftover: Double        // limit remaining, %
+    let perDay: Double          // how much may be spent per day
+    let k: Double               // ratio to the norm
+    let ceiling: Double         // ceiling right now: 100 - norm x days until reset
     var lowRemainder: Bool { leftover < 10 }
 }
 
 func budget(_ s: Sample) -> Budget? {
     guard let r = s.resets else { return nil }
-    let days = max(r.timeIntervalSinceNow / 86400.0, 1.0 / 24.0)   // не меньше часа
+    let days = max(r.timeIntervalSinceNow / 86400.0, 1.0 / 24.0)   // at least an hour
     let leftover = max(100 - s.percent, 0)
     let perDay = leftover / days
 
-    // Потолок на сейчас: где проходит линия равномерного расхода.
-    // Зависит только от времени, поэтому одинаков для всех недельных лимитов.
-    // Всё, что ниже потолка, — идёт с запасом.
+    // Ceiling: where the even-pace line runs right now.
+    // Depends on time only, so it is identical for every weekly limit.
+    // Anything below the ceiling is ahead of schedule.
     let ceiling = max(100 - dailyNorm * days, 0)
 
     return Budget(leftover: leftover, perDay: perDay,
                   k: perDay / dailyNorm, ceiling: ceiling)
 }
 
-// Пороги подобраны так, чтобы цвет НЕ противоречил знаку в строке:
-// жёлтый включается ровно тогда, когда знак переворачивается на «>»,
-// то есть факт превысил потолок (k = 1.00). Красный — когда отставание
-// такое, что равномерным темпом его уже не выправить.
+// Thresholds are chosen so the colour never contradicts the sign in the row:
+// yellow starts exactly when the sign flips to ">", i.e. when the actual
+// value passes the ceiling (k = 1.00). Red is when the gap can no longer be
+// recovered at an even pace.
 func weeklyColor(_ b: Budget) -> NSColor {
-    if b.lowRemainder { return Tone.red }   // жёсткое правило поверх всего
+    if b.lowRemainder { return Tone.red }   // hard rule on top of everything
     if b.k < Cfg.dangerAt { return Tone.red }
     if b.k < Cfg.warnAt { return Tone.yellow }
     return Tone.green
 }
 
-// Для сессии — часы и минуты. Пустое resets_at = окно только что сбросилось,
-// значит впереди полные пять часов.
+// Session uses hours and minutes. An empty resets_at means the window has just
+// rolled over, so a full five hours lie ahead.
 func fmtLeft(_ d: Date?) -> String {
     guard let d = d else { return L("5ч", "5h") }
     let s = Int(d.timeIntervalSinceNow)
-    if s <= 0 { return L("скоро", "soon") }        // окно закрылось между снимками
+    if s <= 0 { return L("скоро", "soon") }        // the window rolled over between snapshots
     let h = s / 3600
     if h >= 24 { return "\(h / 24)\(L("д","d")) \(h % 24)\(L("ч","h"))" }
     if h >= 1 { return "\(h)\(L("ч","h")) \((s % 3600) / 60)\(L("м","m"))" }
     return "\(s / 60)\(L("м","m"))"
 }
 
-// Для недельных лимитов часы не нужны — хватает дней.
+// Weekly limits do not need hours - days are enough.
 func fmtDays(_ d: Date?) -> String {
     guard let d = d else { return "—" }
     let sec = d.timeIntervalSinceNow
@@ -110,36 +110,36 @@ func fmtDays(_ d: Date?) -> String {
     return "\(Int((sec / 86400).rounded()))\(L("д","d"))"
 }
 
-// Знак отношения факта к потолку. Сравниваем ОКРУГЛЁННЫЕ значения,
-// чтобы знак не противоречил цифрам на экране.
+// Sign of actual versus ceiling. ROUNDED values are compared so the sign
+// never contradicts the numbers on screen.
 func relation(_ fact: Double, _ ceiling: Double) -> String {
     let f = fact.rounded(), c = ceiling.rounded()
     return f < c ? "<" : (f > c ? ">" : "=")
 }
 
-// Строка сессии: "5ч  34% < 68%  ·  1ч 37м"
-// Тот же принцип, что и у недельных, но окно пятичасовое: норма 20 % в час,
-// потолок считается пропорционально часам и минутам до сброса.
-// Пустое resets_at = окно только что открылось, впереди все 5 часов.
+// Session row: "5h  34% < 68%  .  1h 37m"
+// Same idea as the weekly rows, but the window is five hours: norm is 20 pp
+// per hour, computed down to the minute.
+// Empty resets_at means the window just opened: all five hours remain.
 func sessionText(_ s: Sample) -> String {
     let hoursLeft = min(max((s.resets?.timeIntervalSinceNow ?? 18000) / 3600.0, 0), 5)
     let ceiling = max(100 - 20.0 * hoursLeft, 0)
     let mid = String(format: " %@ %2.0f%%", relation(s.percent, ceiling), ceiling)
     return fmtRow(L("5ч","5h"), s.percent, mid, fmtLeft(s.resets))
 }
-// Строки выровнены по колонкам: тег | процент | потолок | время до сброса.
-// Средний блок занимает фиксированную ширину — чтобы время
-// у всех трёх строк стояло в одном столбце.
+// Rows are aligned in columns: tag | actual | ceiling | time until reset.
+// The middle block has a fixed width so the time column lines up
+// across all three rows.
 func fmtRow(_ tag: String, _ pct: Double, _ mid: String, _ time: String) -> String {
     "\(pad(tag, 6))\(String(format: "%3.0f", pct))%\(pad(mid, 7))· \(time)"
 }
 
-// Строка недельного лимита: "Fable  75% > 73%  ·  1д 22ч"
-// Вторая цифра — потолок на сейчас: линия равномерного расхода, 100 − 14.29 × дни.
-// Она одинакова для обеих строк и зависит только от времени до сброса.
-// Знак показывает отношение факта к потолку: < запас, > перебор, = ровно.
-// Сравниваем ОКРУГЛЁННЫЕ значения, чтобы знак не противоречил цифрам на экране.
-// При остатке ниже 10% потолок бессмысленен — показываем прямой остаток.
+// Weekly row: "Fable  75% > 73%  .  1d 22h"
+// The second number is the ceiling: the even-pace line, 100 - 14.29 x days.
+// It is the same for both rows and depends only on time until reset.
+// The sign shows actual versus ceiling: < under, > over, = exactly on pace.
+// ROUNDED values are compared so the sign matches the numbers on screen.
+// Below 10% remaining the ceiling is meaningless - show the remainder instead.
 func weeklyText(_ tag: String, _ s: Sample, _ b: Budget) -> String {
     if s.percent >= 100 {
         return fmtRow(tag, s.percent, "", "\(L("сброс","reset")) \(fmtLeft(s.resets))")
@@ -163,11 +163,11 @@ func fmtAgo(_ sec: TimeInterval) -> String {
     return "\(s / 60)\(L("м","m"))"
 }
 
-// Высота полосы со светофором. В покое окно её не занимает вовсе — стоит
-// вплотную к углу; при наведении опускается вниз на stripH и освобождает место.
+// Height of the hover strip with the traffic lights. At rest the window does not
+// include it and sits flush in the corner; on hover it drops down by stripH.
 let stripH: CGFloat = 22
 
-// --- Настройки, все живут в UserDefaults ---
+// --- Settings, all stored in UserDefaults ---
 enum Cfg {
     static let d = UserDefaults.standard
     static var mode: String { d.string(forKey: "mode") ?? "numbers" }   // numbers | bars
@@ -199,7 +199,7 @@ enum Cfg {
     static var dangerAt: Double { d.double(forKey: "dangerAt") > 0 ? d.double(forKey: "dangerAt") : 0.85 }
 }
 
-// Цвета светофора: в дневной теме нужны тёмные оттенки, иначе не видно.
+// Traffic-light colours: the light theme needs darker shades to stay readable.
 enum Tone {
     static var green: NSColor { Cfg.isDark ? .systemGreen : NSColor(srgbRed: 0.10, green: 0.48, blue: 0.20, alpha: 1) }
     static var yellow: NSColor { Cfg.isDark ? .systemYellow : NSColor(srgbRed: 0.65, green: 0.45, blue: 0.02, alpha: 1) }
@@ -207,7 +207,7 @@ enum Tone {
     static var gray: NSColor { Cfg.isDark ? .systemGray : NSColor(calibratedWhite: 0.35, alpha: 1) }
 }
 
-// Локализация: пара строк на месте вызова, без таблиц ключей.
+// Localisation: a pair of strings at the call site, no key tables.
 func L(_ ru: String, _ en: String) -> String {
     switch Cfg.lang {
     case "ru": return ru
@@ -251,8 +251,8 @@ final class PanelView: NSView {
 
     override var isFlipped: Bool { true }
 
-    // Отслеживание курсора событийное: система шлёт вход и выход,
-    // никаких таймеров и перерисовки в покое.
+    // Cursor tracking is event-driven: the system sends enter and exit,
+    // no timers and no redraw at rest.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
@@ -263,7 +263,7 @@ final class PanelView: NSView {
     override func mouseEntered(with e: NSEvent) { hovered = true; onHover?(true) }
     override func mouseExited(with e: NSEvent) { hovered = false; onHover?(false) }
 
-    // Светофор слева в верхней полосе: закрыть, свернуть, настройки.
+    // Traffic lights on the left of the strip: dock, hide, collapse.
     func lights() -> [NSRect] {
         guard hovered else { return [] }
         let d: CGFloat = 12, gap: CGFloat = 8
@@ -274,12 +274,12 @@ final class PanelView: NSView {
         }
     }
 
-    // Настройки и помощь — правее кружков, теми же размерами.
+    // Settings and help, same size, to the right of the lights.
     func tools() -> [NSRect] {
         guard hovered else { return [] }
-        // Прижаты к правому краю: в macOS левый угол принадлежит только
-        // светофору, служебные кнопки живут справа — и мимо них не промахнёшься
-        // в красный кружок.
+        // Pinned to the right edge: in macOS the left corner belongs to the traffic
+        // lights only, utility buttons live on the right - and you stop misclicking
+        // the red circle.
         let d: CGFloat = 13, gap: CGFloat = 10
         var x = bounds.maxX - (d * 2 + gap) - 10
         return (0..<2).map { _ -> NSRect in
@@ -318,7 +318,7 @@ final class PanelView: NSView {
         if Cfg.mode == "bars" { drawBars(in: body) }
     }
 
-    // Графический режим: дорожка, заливка по факту и риска-потолок.
+    // Bar mode: track, fill by actual usage and a tick mark at the ceiling.
     func drawBars(in body: NSRect) {
         let fs = Cfg.fontSize, rowH = fs + 9
         let font = NSFont.monospacedSystemFont(ofSize: fs - 2, weight: .medium)
@@ -339,7 +339,7 @@ final class PanelView: NSView {
                                              height: track.height),
                          xRadius: track.height / 2, yRadius: track.height / 2).fill()
 
-            // риска потолка — где проходит линия равномерного расхода
+            // ceiling tick - where the even-pace line runs
             let cx = track.minX + track.width * CGFloat(min(row.ceiling, 100)) / 100
             (Cfg.isDark ? NSColor(calibratedWhite: 0.95, alpha: 0.85) : NSColor(calibratedWhite: 0.15, alpha: 0.85)).setFill()
             NSRect(x: cx - 1, y: track.minY - 2, width: 2, height: track.height + 4).fill()
@@ -416,8 +416,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         window.contentView = v
 
-        // По умолчанию — левый верхний угол. Если плашку двигали, положение
-        // запоминается и восстанавливается (но только если оно на экране).
+        // Default is the chosen corner. If the panel was dragged, the position is
+        // remembered and restored - but only if it still lands on a screen.
         window.delegate = self
         let d = UserDefaults.standard
         var placed = false
@@ -434,7 +434,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         window.orderFrontRegardless()
 
-        // Показывать плашку только когда активен сам Claude
+        // Show the panel only while Claude itself is frontmost
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
@@ -442,9 +442,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         refresh()
         startTimer()
-        // Сторож видимости: уведомления о смене активного приложения приходят
-        // не всегда (например, при клике по рабочему столу), и окно могло
-        // остаться скрытым до следующего обновления через 5 минут.
+        // Visibility watchdog: activation notifications do not always arrive (clicking
+        // the desktop, for one), and the window could stay hidden until the next
+        // refresh five minutes later.
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in self.syncVisibility() }
     }
 
@@ -456,10 +456,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     var shouldBeVisible: Bool {
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        if docked { return false }          // возвращается только кликом по иконке в доке
+        if docked { return false }          // comes back only by clicking the Dock icon
         if hidden {
-            // Сначала нужно уйти из Claude, иначе плашка вернулась бы через две
-            // секунды после нажатия — режим был бы бесполезен.
+            // You must leave Claude first, otherwise the panel would return two seconds
+            // after the click and the mode would be useless.
             if front != claudeBundleID && front != Bundle.main.bundleIdentifier {
                 leftClaudeSinceHide = true
             }
@@ -483,16 +483,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if window.isVisible { rescueOffscreen() }
     }
 
-    // Запоминаем, куда пользователь перетащил плашку.
+    // Remember where the user dragged the panel.
     func windowDidMove(_ n: Notification) {
         let d = UserDefaults.standard
         d.set(Double(window.frame.origin.x), forKey: "originX")
         d.set(Double(window.frame.origin.y), forKey: "originY")
     }
 
-    // Окно могло остаться за пределами видимой области: отключили внешний
-    // монитор, поменялось разрешение, сон-пробуждение. Процесс при этом жив
-    // и «показан», но на экране его нет. Возвращаем в левый верхний угол.
+    // The window may end up off-screen: external display unplugged, resolution
+    // changed, sleep and wake. The process is alive and the window is "visible",
+    // but nothing is on screen. Put it back into the chosen corner.
     func rescueOffscreen() {
         let f = window.frame
         let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
@@ -507,9 +507,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applyVisibility(_ bundleID: String?) {
-        // Своё приложение тоже считаем «своим»: при перетаскивании плашки
-        // активной становится она сама, и без этой проверки она пряталась
-        // прямо под курсором в момент перетаскивания.
+        // Our own app counts as "ours": dragging the panel makes it frontmost, and
+        // without this check it would hide itself right under the cursor while being
+        // dragged.
         let mine = Bundle.main.bundleIdentifier
         if bundleID == claudeBundleID || (bundleID != nil && bundleID == mine) {
             refresh()
@@ -519,13 +519,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // Зелёная кнопка — сжать плашку до одной строки и обратно.
+    // Green button: collapse the panel to a single row and back.
     @objc func toggleCollapse() {
         Cfg.d.set(!Cfg.collapsed, forKey: "collapsed")
         refresh()
     }
 
-    // Какие строки показывать: в свёрнутом виде только одну, выбранную в меню.
+    // Which rows to show: when collapsed, only the one picked in the menu.
     func allow(_ id: String) -> Bool {
         if Cfg.collapsed { return Cfg.collapsedRow == id }
         switch id {
@@ -537,8 +537,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func quit() { NSApp.terminate(nil) }
 
-    // «Выйти» — совсем: наблюдатель не поднимет. Флаг снимается при
-    // ручном запуске приложения.
+    // Quit means quit: the watcher will not relaunch. The flag is cleared when
+    // the app is started manually.
     static let noAutoFlag = NSString(string: "~/.overlimit/no-autostart").expandingTildeInPath
 
     @objc func quitForever() {
@@ -591,17 +591,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         a.runModal()
     }
 
-    // --- Два состояния «убрать» ---
-    // docked  (красный): процесс жив, иконка в доке, сам не возвращается —
-    //                    только кликом по иконке в доке.
-    // hidden  (жёлтый):  процесс жив, иконки нигде нет, вернётся сам
-    //                    при следующем переключении в Claude.
+    // --- Two ways to put the panel away ---
+    // docked (red): process alive, icon in the Dock, never returns on its own -
+    //                    only by clicking that icon.
+    // hidden (yellow): process alive, no icon anywhere, returns by itself on the
+    //                    next switch back to Claude.
     var docked = false
     var hidden = false
     var leftClaudeSinceHide = false
 
-    // Первое нажатие: прячем в док и через 15 минут возвращаем — один раз.
-    // Второе подряд: остаётся в доке насовсем, до клика по иконке.
+    // First press: dock it and bring it back after 15 minutes, once.
+    // Second press in a row: it stays docked until the icon is clicked.
     var dockPresses = 0
     var dockTimer: Timer?
 
@@ -613,7 +613,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if dockPresses == 0 {
             dockTimer = Timer.scheduledTimer(withTimeInterval: 900, repeats: false) { _ in
                 self.restore()
-                self.dockPresses = 1        // возврат был, следующий раз — насовсем
+                self.dockPresses = 1        // it came back once; next time it stays
             }
         }
         dockPresses += 1
@@ -633,16 +633,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.orderFrontRegardless()
     }
 
-    // Клик по иконке в доке — осознанный возврат, счётчик обнуляем.
+    // Clicking the Dock icon is a deliberate return, so reset the counter.
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool {
         dockPresses = 0
         restore()
         return true
     }
 
-    // --- Место по умолчанию ---
-    // Угол выбирается в меню. Перетаскивание запоминается и живёт до тех пор,
-    // пока не нажмёшь «Вернуть на место».
+    // --- Default position ---
+    // The corner is chosen in the menu. A drag is remembered and stays until
+    // "Reset position" is used.
     func defaultOrigin(_ size: NSSize) -> NSPoint {
         guard let scr = NSScreen.main else { return .zero }
         let vf = scr.visibleFrame, m: CGFloat = 2
@@ -665,7 +665,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         resetPosition()
     }
 
-    // Универсальный переключатель настройки: пишет значение и перерисовывает.
+    // Generic setting switch: stores the value and redraws.
     @objc func pick(_ sender: NSMenuItem) {
         guard let pair = sender.representedObject as? [String: Any],
               let key = pair["k"] as? String else { return }
@@ -680,7 +680,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refresh()
     }
 
-    // Ручной ввод значения для любой числовой настройки.
+    // Manual entry for any numeric setting.
     @objc func manual(_ sender: NSMenuItem) {
         guard let info = sender.representedObject as? [String: Any],
               let key = info["k"] as? String else { return }
@@ -725,9 +725,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return item
     }
 
-    // --- Строка меню macOS ---
-    // Показывает самый напряжённый лимит и открывает то же меню настроек.
-    // Видна всегда, даже когда плашка скрыта или убрана в док.
+    // --- macOS menu bar ---
+    // Shows the tightest limit and opens the same settings menu.
+    // Always visible, even while the panel is hidden or docked.
     func setupStatusItem() {
         if Cfg.statusBar {
             if statusItem == nil {
@@ -852,7 +852,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return m
     }
 
-    // --- Настройки ---
+    // --- Settings ---
     var settingsWin: NSWindow?
 
     @objc func openSettings() {
@@ -898,8 +898,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // Стиль абзаца с запретом переноса. У многострочного NSTextField свойства
-    // поля (lineBreakMode / wraps) не действуют — перенос управляется отсюда.
+    // Paragraph style that forbids wrapping. On a multi-line NSTextField the
+    // field properties (lineBreakMode / wraps) do nothing - wrapping lives here.
     static let noWrap: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
         p.lineBreakMode = .byClipping
@@ -927,7 +927,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let cur = all.filter { abs($0.ts.timeIntervalSince(newest)) < 1 }
         var rows: [Row] = []
 
-        // 1. Пятичасовая сессия — потолок по часам, цвет по остатку
+        // 1. Five-hour session: ceiling by hours, colour by remaining
         if allow("session"), let s = cur.first(where: { $0.kind == "session" }) {
             out.append(line(sessionText(s) + "\n", sessionColor(s.percent)))
             let hl = min(max((s.resets?.timeIntervalSinceNow ?? 18000) / 3600.0, 0), 5)
@@ -935,7 +935,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             color: sessionColor(s.percent), time: fmtLeft(s.resets)))
         }
 
-        // 2-3. Недельные лимиты — по суточному бюджету, цвет говорит сам за себя
+        // 2-3. Weekly limits: daily budget, the colour speaks for itself
         var weeklies: [(String, Sample)] = []
         if allow("all"), let a = cur.first(where: { $0.kind == "weekly_all" }) { weeklies.append((L("Все","All"), a)) }
         if allow("scoped"),
@@ -953,8 +953,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupStatusItem()
         updateStatusItem(rows)
 
-        // Четвёртой строки нет: цвет строк сам сигнализирует.
-        // Исключение — сбор данных встал, об этом молчать нельзя.
+        // There is no fourth row: the row colours are the signal.
+        // One exception: if collection stalls, we must not stay silent.
         let age = Date().timeIntervalSince(newest)
         if age > 900 {
             out.append(line("\n⚠︎ \(L("данные устарели","data is stale")): \(fmtAgo(age))", .systemOrange, size: 13))
@@ -963,10 +963,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fitToContent()
     }
 
-    // Ширина окна подгоняется под самую длинную строку.
-    // ВАЖНО: size() у NSAttributedString меряет текст как одну строку и игнорирует
-    // переносы — ширина выходит заниженной, текст начинает заворачиваться.
-    // Мерить нужно через boundingRect с .usesLineFragmentOrigin.
+    // Window width is fitted to the longest row.
+    // IMPORTANT: NSAttributedString.size() measures the text as a single line and
+    // ignores newlines - the width comes out too small and the text wraps.
+    // Measure with boundingRect and .usesLineFragmentOrigin instead.
     func fitToContent() {
         let padL: CGFloat = 8, padY: CGFloat = 4
         let padR: CGFloat = 4
@@ -983,7 +983,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let huge = NSSize(width: CGFloat(10000), height: CGFloat(10000))
             let r = label.attributedStringValue.boundingRect(with: huge,
                                                              options: [.usesLineFragmentOrigin])
-            textW = ceil(r.width) + 12      // запас: ячейка поля добавляет свои врезки
+            textW = ceil(r.width) + 12      // slack: the field cell adds its own insets
             textH = ceil(r.height) + 4
             w = textW + padL + padR
             h = textH + padY * 2 + strip
@@ -993,11 +993,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         var f = window.frame
         guard abs(f.size.width - w) > 0.5 || abs(f.size.height - h) > 0.5 else { return }
-        f.origin.y += f.size.height - h        // верхний край на месте
+        f.origin.y += f.size.height - h        // keep the top edge in place
         f.size = NSSize(width: w, height: h)
 
-        // Не даём окну уехать за край: после перетаскивания к границе экрана
-        // рост ширины мог вытолкнуть его за пределы видимой области.
+        // Keep the window on screen: after dragging it to the edge, a width increase
+        // could push it out of the visible area.
         if let scr = window.screen ?? NSScreen.main {
             let vf = scr.visibleFrame
             f.origin.x = min(max(f.origin.x, vf.minX), max(vf.maxX - w, vf.minX))

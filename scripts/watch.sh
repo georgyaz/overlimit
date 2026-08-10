@@ -1,12 +1,12 @@
 #!/bin/bash
-# watch.sh — держит плашку запущенной, пока открыт Claude.
-# Запускается launchd-агентом app.overlimit.watch раз в 300 с.
+# watch.sh - keeps the panel running while Claude is open.
+# Run by the app.overlimit.watch launchd agent every 300 s.
 #
-# Правила:
-#   - плашка уже висит → ничего не делаем;
-#   - Claude закрыт → гасим плашку, счётчик закрытий обнуляем;
-#   - закрыл второй раз подряд → больше не поднимаем
-#     до перезапуска самого Claude (сравниваем PID приложения).
+# Rules:
+#   - panel already up -> do nothing;
+#   - Claude closed -> hide the panel, reset the close counter;
+#   - closed twice in a row -> stop relaunching it
+#     until Claude itself restarts (compared by process id).
 
 APP="$HOME/Applications/Overlimit.app"
 NOAUTO="$HOME/.overlimit/no-autostart"
@@ -14,9 +14,9 @@ NOAUTO="$HOME/.overlimit/no-autostart"
 STATE="$HOME/.overlimit/panel-state"
 MAX_CLOSES=2
 
-# ВАЖНО: pgrep -f не видит главный процесс Claude — у него недоступны аргументы
-# командной строки (hardened runtime), находятся только helper-процессы.
-# Поэтому ищем по comm через ps: там путь виден.
+# IMPORTANT: pgrep -f cannot see the main Claude process - its command-line
+# arguments are unreadable under hardened runtime, only helpers show up.
+# So match on comm via ps, where the executable path is visible.
 claude_pid() {
   ps -A -o pid=,comm= \
     | sed -n 's#^ *\([0-9][0-9]*\) /Applications/Claude.app/Contents/MacOS/Claude$#\1#p' \
@@ -36,17 +36,17 @@ save() {
   printf 'closes=%s\nlast_pid="%s"\nwas_up=%s\n' "$closes" "$last_pid" "$was_up" > "$STATE"
 }
 
-# «Выйти» ставит флаг — не поднимаем вообще, пока не запустят руками
+# Quit sets a flag - never relaunch until started manually
 if [ -f "$NOAUTO" ]; then
   exit 0
 fi
 
-# «Выйти» из меню ставит флаг — не поднимаем, пока не запустят руками
+# Quit from the menu sets a flag - do not relaunch until started manually
 if [ -f "$NOAUTO" ]; then exit 0; fi
 
 CPID=$(claude_pid)
 
-# Claude не запущен: гасим плашку и сбрасываем состояние
+# Claude is not running: hide the panel and reset state
 if [ -z "$CPID" ]; then
   panel_running && kill_panel
   closes=0; last_pid=""; was_up=0
@@ -54,27 +54,27 @@ if [ -z "$CPID" ]; then
   exit 0
 fi
 
-# Claude перезапустили (другой PID) — счётчик закрытий обнуляется
+# Claude restarted (different pid) - reset the close counter
 if [ "$CPID" != "$last_pid" ]; then
   closes=0
   last_pid="$CPID"
 fi
 
-# Плашка висит — ничего не трогаем
+# Panel is up - leave it alone
 if panel_running; then
   was_up=1
   save
   exit 0
 fi
 
-# Плашки нет. Если в прошлый раз была — значит закрыли крестиком
+# Panel is gone. If it was up last time, the user closed it
 if [ "$was_up" = "1" ]; then
   closes=$((closes + 1))
 fi
 was_up=0
 
 if [ "$closes" -ge "$MAX_CLOSES" ]; then
-  # закрыли второй раз подряд — больше не поднимаем совсем
+  # closed twice in a row - stop relaunching entirely
   touch "$NOAUTO"
   save
   exit 0

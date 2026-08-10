@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-"""token.py — выдаёт валидный access token, обновляя его при необходимости.
+"""token.py - returns a valid access token, refreshing it when needed.
 
-Источник правды — связка ключей macOS (сервис "Claude Code-credentials"),
-та же, что использует Claude Code CLI. Если access token протух, обновляем его
-по refresh-токену и пишем обратно в связку, чтобы CLI и этот скрипт не
-разъезжались.
+The source of truth is the macOS keychain (service "Claude Code-credentials"),
+the same entry Claude Code CLI uses. When the access token has expired it is
+refreshed via the refresh token and written back to that entry, so the CLI and
+this tool never drift apart.
 
-Использование:  python3 token.py           -> печатает access token
-                python3 token.py --force   -> принудительно обновить
+Usage:  python3 token.py           -> prints the access token
+        python3 token.py --force   -> force a refresh
 """
 import json, subprocess, sys, time, urllib.request, urllib.error
 
 SERVICE = "Claude Code-credentials"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-# Эндпоинт переехал с console.anthropic.com на platform.claude.com;
-# старый оставлен запасным на случай обратного переезда.
+# The endpoint moved from console.anthropic.com to platform.claude.com;
+# the old one is kept as a fallback in case it moves back.
 TOKEN_URLS = ["https://platform.claude.com/v1/oauth/token",
               "https://console.anthropic.com/v1/oauth/token"]
-SKEW_MS = 5 * 60 * 1000          # обновляем за 5 минут до истечения
+SKEW_MS = 5 * 60 * 1000          # refresh 5 minutes before expiry
 BACKOFF = "/tmp/.overlimit-refresh-backoff"
 
 
 def keychain_account():
-    """Поле acct у записи CLI (у Georgy — имя пользователя macOS).
-    Если писать с другим acct, создаётся ВТОРАЯ запись, а CLI продолжает
-    читать старую — и его refresh-токен протухает. Так уже было 2026-08-07."""
+    """The acct field of the CLI keychain entry (the macOS username).
+    Writing with a different acct silently creates a SECOND entry while the CLI
+    keeps reading the old one - and since refresh tokens rotate, that breaks
+    the CLI's authentication."""
     out = subprocess.run(["security", "find-generic-password", "-s", SERVICE],
                          capture_output=True, text=True)
     for line in out.stdout.splitlines():
@@ -37,25 +38,25 @@ def read_keychain():
     out = subprocess.run(["security", "find-generic-password", "-s", SERVICE, "-w"],
                          capture_output=True, text=True)
     if out.returncode != 0:
-        raise SystemExit("keychain: запись не найдена")
+        raise SystemExit("keychain: entry not found")
     return json.loads(out.stdout)
 
 
 def write_keychain(data):
     acct = keychain_account()
     if not acct:
-        raise SystemExit("keychain: не определён acct, запись отменена")
+        raise SystemExit("keychain: acct unknown, refusing to write")
     subprocess.run(["security", "add-generic-password", "-U", "-s", SERVICE,
                     "-a", acct, "-w", json.dumps(data)],
                    capture_output=True, text=True, check=True)
 
 
 def refresh(data):
-    """Обновляет токен. При 429 ставит паузу, чтобы не долбиться в стену."""
+    """Refreshes the token. Backs off for 30 minutes on HTTP 429."""
     try:
         until = float(open(BACKOFF).read().strip())
         if time.time() < until:
-            raise SystemExit("refresh: пауза после 429, ещё %d с" % (until - time.time()))
+            raise SystemExit("refresh: backing off after 429, %d s left" % (until - time.time()))
     except (FileNotFoundError, ValueError):
         pass
 
@@ -77,12 +78,12 @@ def refresh(data):
             last = str(e.code)
             if e.code == 429:
                 with open(BACKOFF, "w") as f:
-                    f.write(str(time.time() + 1800))     # пауза 30 минут
+                    f.write(str(time.time() + 1800))     # 30-minute backoff
                 break
         except Exception as e:
             last = type(e).__name__
     if not new:
-        raise SystemExit("refresh: не удалось, последний ответ %s" % last)
+        raise SystemExit("refresh: failed, last response %s" % last)
 
     oauth["accessToken"] = new["access_token"]
     if new.get("refresh_token"):

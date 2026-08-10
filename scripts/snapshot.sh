@@ -1,6 +1,6 @@
 #!/bin/bash
-# snapshot.sh — снимок лимитов Claude в CSV. Запускается по launchd раз в 5 мин.
-# Рабочая копия: ~/.overlimit/snapshot.sh
+# snapshot.sh - snapshots Claude usage limits into a CSV. Run by launchd every 5 min.
+# Installed copy: ~/.overlimit/snapshot.sh
 set -uo pipefail
 
 DIR="$HOME/.overlimit"
@@ -27,7 +27,7 @@ CODE=$(printf '%s' "$RESP" | tail -1)
 BODY=$(printf '%s' "$RESP" | sed '$d')
 
 if [ "$CODE" = "401" ]; then
-  # токен протух между проверкой и запросом — обновляем принудительно и пробуем ещё раз
+  # token expired between the check and the call - force a refresh and retry once
   TOKEN=$(python3 "$DIR/token.py" --force 2>>"$ERR")
   if [ -n "${TOKEN:-}" ]; then
     RESP=$(curl -s -m 20 -w $'\n%{http_code}' "https://api.anthropic.com/api/oauth/usage" \
@@ -56,17 +56,17 @@ for l in d.get("limits") or []:
     model = ((sc.get("model") or {}).get("display_name")) or ""
     rows.append([now, l.get("kind",""), l.get("group",""), model,
                  l.get("percent",""), l.get("severity",""),
-                 l.get("resets_at") or "",          # None -> пусто, иначе ломается парсер
+                 l.get("resets_at") or "",          # None -> empty, otherwise the parser breaks
                  l.get("is_active","")])
 for r in rows:
     print(",".join(str(x) for x in r))
 ' >> "$CSV"
 
-# --- фиксация итогов закрывшихся окон ---
-# Если resets_at изменился с прошлого снапшота, значит окно закрылось.
-# Дописываем в history.csv, с каким итогом оно закрылось (последнее известное значение).
-# Тело ответа кладём во временный файл: heredoc ниже занимает stdin,
-# поэтому передать JSON через пайп нельзя.
+# --- record the outcome of closed windows ---
+# A changed resets_at means the previous window has closed.
+# Append the final known percentage to history.csv.
+# The response body goes to a temp file: the heredoc below occupies stdin,
+# so the JSON cannot be piped in.
 printf '%s' "$BODY" > "$DIR/.last-body.json"
 python3 - "$DIR/.last-body.json" "$CSV" "$DIR/history.csv" <<'PYEOF'
 import sys, json, csv, os, datetime
@@ -74,7 +74,7 @@ import sys, json, csv, os, datetime
 body = json.load(open(sys.argv[1]))
 csv_path, hist_path = sys.argv[2], sys.argv[3]
 
-# текущие resets_at по каждому лимиту
+# current resets_at for every limit
 now_resets = {}
 for l in body.get("limits") or []:
     model = ((l.get("scope") or {}).get("model") or {}).get("display_name") or ""
@@ -84,12 +84,12 @@ for l in body.get("limits") or []:
 if not os.path.exists(csv_path):
     sys.exit(0)
 
-# последнее состояние из лога (предыдущий снапшот)
+# last state from the log (previous snapshot)
 rows = list(csv.DictReader(open(csv_path)))
 if not rows:
     sys.exit(0)
-# блок выполняется ПОСЛЕ дозаписи, поэтому последняя метка — уже текущий снимок.
-# Предыдущим считаем предпоследнюю уникальную метку времени.
+# this block runs AFTER the append, so the newest stamp is the current snapshot.
+# Treat the second-newest unique timestamp as the previous one.
 stamps = sorted({r["ts_utc"] for r in rows})
 if len(stamps) < 2:
     sys.exit(0)
@@ -109,7 +109,7 @@ def parse(s):
 
 for key, old in prev.items():
     new_r, old_r = parse(now_resets.get(key) or ""), parse(old["resets_at"])
-    # доли секунды в resets_at пляшут от запроса к запросу — сравниваем с допуском
+    # fractional seconds in resets_at differ on every call - compare with tolerance
     if new_r and old_r and abs((new_r - old_r).total_seconds()) > 3600:
         closed.append({"window_end": old["resets_at"], "kind": key[0],
                        "model": key[1], "final_percent": old["percent"],

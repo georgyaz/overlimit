@@ -1,19 +1,19 @@
 import AppKit
 import CoreGraphics
 
-// make-icon.swift — рисует иконку «три полосы» во все нужные размеры
-// и складывает в AppIcon.iconset для сборки через iconutil.
+// make-icon.swift - draws the three-bar icon at every required size
+// and writes AppIcon.iconset for iconutil to assemble.
 
 let bg    = NSColor(srgbRed: 0.106, green: 0.106, blue: 0.098, alpha: 1)  // #1B1B19
 let track = NSColor(srgbRed: 0.227, green: 0.227, blue: 0.216, alpha: 1)  // #3A3A37
 let green = NSColor(srgbRed: 0.290, green: 0.871, blue: 0.502, alpha: 1)  // #4ADE80
 let amber = NSColor(srgbRed: 0.980, green: 0.800, blue: 0.082, alpha: 1)  // #FACC15
 
-// доли от стороны иконки: ширина дорожки, заполнение, цвет
+// fractions of the icon side: fill share and colour
 let bars: [(fill: CGFloat, color: NSColor)] = [
-    (0.354, green),   // 5ч
-    (0.635, green),   // Все
-    (0.750, amber),   // Fable — жёлтый, как сейчас
+    (0.354, green),   // session
+    (0.635, green),   // all models
+    (0.750, amber),   // per-model, yellow
 ]
 
 func drawIcon(size: CGFloat) -> NSImage {
