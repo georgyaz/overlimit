@@ -790,9 +790,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                       Cfg.statusBar,
                       display: Cfg.statusBar ? L("показывать","shown") : L("скрыта","hidden")))
         m.addItem(sub(L("Язык","Language"), "lang",
+                      // ordered by the English name of each language
                       [(L("Как в системе","Match system"), "system"),
-                       ("English", "en"), ("Русский", "ru"), ("Français", "fr"),
-                       ("Español", "es"), ("Português", "pt"), ("中文", "zh")], Cfg.lang,
+                       ("中文", "zh"), ("English", "en"), ("Français", "fr"),
+                       ("Português", "pt"), ("Русский", "ru"), ("Español", "es")], Cfg.lang,
                       display: ["system": L("как в системе","match system"), "en": "english",
                                 "ru": "русский", "fr": "français", "es": "español",
                                 "pt": "português", "zh": "中文"][Cfg.lang]
