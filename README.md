@@ -99,10 +99,10 @@ users. It reads your own usage numbers, on your own machine, with your own
 credential — the same numbers the Claude settings screen shows you.
 
 That is the spirit of the rule. It is not obviously the letter of it. In
-January 2026 Anthropic began returning `This credential is only authorized for
-use with Claude Code` for consumer tokens used elsewhere; the usage endpoint
-still answers today, but it may stop at any time, and that would be entirely
-their prerogative.
+January 2026 Anthropic began rejecting consumer tokens used elsewhere with
+`This credential is only authorized for use with Claude Code`; the usage
+endpoint still answers today, but it may stop at any time, and that would be
+entirely their prerogative.
 
 Install this only if you are comfortable with that. If you are building a
 product rather than watching your own numbers, use an API key instead.
