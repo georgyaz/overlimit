@@ -63,6 +63,11 @@ echo "==> first snapshot"
 "$DIR/snapshot.sh" || { echo "snapshot failed, see $DIR/usage-log.err"; exit 1; }
 
 rm -f "$DIR/no-autostart"
+
+# A running copy must be stopped first: `open` on an already-running app does
+# nothing, so the freshly built binary would sit unused until the next reboot.
+RUNNING=$(ps -A -o pid=,comm= | grep -F "Overlimit.app/Contents/MacOS/Overlimit" | awk '{print $1}' | head -1)
+[ -n "$RUNNING" ] && kill "$RUNNING" 2>/dev/null && sleep 1
 open -g "$APP"
 echo
 echo "Done. The panel shows up when Claude Desktop is in the foreground."
