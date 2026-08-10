@@ -1,0 +1,975 @@
+import Cocoa
+
+// Overlimit — floating usage panel for Claude subscription limits.
+// Читает ~/.overlimit/usage-log.csv (пишется launchd-агентом раз в 5 мин).
+
+struct Sample {
+    let ts: Date
+    let kind: String
+    let model: String
+    let percent: Double
+    let resets: Date?          // пусто, когда окно только что сбросилось
+    let active: Bool
+    var isWeekly: Bool { kind.hasPrefix("weekly") }
+}
+
+let csvPath = NSString(string: "~/.overlimit/usage-log.csv").expandingTildeInPath
+
+func parseISO(_ s: String) -> Date? {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = f.date(from: s) { return d }
+    f.formatOptions = [.withInternetDateTime]
+    return f.date(from: s)
+}
+
+func loadSamples() -> [Sample] {
+    guard let raw = try? String(contentsOfFile: csvPath, encoding: .utf8) else { return [] }
+    var out: [Sample] = []
+    for line in raw.split(separator: "\n").dropFirst() {
+        let c = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        guard c.count >= 8, let ts = parseISO(c[0]), let p = Double(c[4]) else { continue }
+        out.append(Sample(ts: ts, kind: c[1], model: c[3], percent: p,
+                          resets: parseISO(c[6]), active: c[7].hasPrefix("True")))
+    }
+    return out
+}
+
+// Светофор для ПЯТИЧАСОВОЙ сессии — по ОСТАТКУ, а не по темпу.
+// Внутри пятичасового окна темп ничего не значит: сэкономленное на потом
+// не переносится, через пять часов всё обнуляется. Важно одно — упрёшься ли
+// в стену. Поэтому «жжёшь быстрее равномерного» здесь не сигнал, а шум.
+// Пороги: жёлтый при остатке <35% (успеть перепланировать),
+// красный при <15% (20% пятичасового окна — это ещё ~40 минут работы).
+func sessionColor(_ percent: Double) -> NSColor {
+    let left = 100 - percent
+    if left < 15 { return Tone.red }
+    if left < 35 { return Tone.yellow }
+    return Tone.green
+}
+
+// --- Недельные лимиты: суточный бюджет ---
+// Норма — ровно 1/7 окна в день (14.29 п.п.). Одно значение и для цвета,
+// и для потолка, иначе на границе они расходятся.
+// k = бюджет / норма. Метрика самокалибруется: в начале окна остаток 100% и 7 дней
+// впереди дают ровно норму (k=1), поэтому предохранитель на старт недели не нужен.
+let dailyNorm = 100.0 / 7.0
+
+struct Budget {
+    let leftover: Double        // остаток лимита, %
+    let perDay: Double          // сколько можно в сутки
+    let k: Double               // отношение к норме
+    let ceiling: Double         // потолок на сейчас: 100 − норма × дни до сброса
+    var lowRemainder: Bool { leftover < 10 }
+}
+
+func budget(_ s: Sample) -> Budget? {
+    guard let r = s.resets else { return nil }
+    let days = max(r.timeIntervalSinceNow / 86400.0, 1.0 / 24.0)   // не меньше часа
+    let leftover = max(100 - s.percent, 0)
+    let perDay = leftover / days
+
+    // Потолок на сейчас: где проходит линия равномерного расхода.
+    // Зависит только от времени, поэтому одинаков для всех недельных лимитов.
+    // Всё, что ниже потолка, — идёт с запасом.
+    let ceiling = max(100 - dailyNorm * days, 0)
+
+    return Budget(leftover: leftover, perDay: perDay,
+                  k: perDay / dailyNorm, ceiling: ceiling)
+}
+
+// Пороги подобраны так, чтобы цвет НЕ противоречил знаку в строке:
+// жёлтый включается ровно тогда, когда знак переворачивается на «>»,
+// то есть факт превысил потолок (k = 1.00). Красный — когда отставание
+// такое, что равномерным темпом его уже не выправить.
+func weeklyColor(_ b: Budget) -> NSColor {
+    if b.lowRemainder { return Tone.red }   // жёсткое правило поверх всего
+    if b.k < Cfg.dangerAt { return Tone.red }
+    if b.k < Cfg.warnAt { return Tone.yellow }
+    return Tone.green
+}
+
+// Для сессии — часы и минуты. Пустое resets_at = окно только что сбросилось,
+// значит впереди полные пять часов.
+func fmtLeft(_ d: Date?) -> String {
+    guard let d = d else { return L("5ч", "5h") }
+    let s = Int(d.timeIntervalSinceNow)
+    if s <= 0 { return L("скоро", "soon") }        // окно закрылось между снимками
+    let h = s / 3600
+    if h >= 24 { return "\(h / 24)\(L("д","d")) \(h % 24)\(L("ч","h"))" }
+    if h >= 1 { return "\(h)\(L("ч","h")) \((s % 3600) / 60)\(L("м","m"))" }
+    return "\(s / 60)\(L("м","m"))"
+}
+
+// Для недельных лимитов часы не нужны — хватает дней.
+func fmtDays(_ d: Date?) -> String {
+    guard let d = d else { return "—" }
+    let sec = d.timeIntervalSinceNow
+    if sec <= 0 { return L("скоро", "soon") }
+    if sec < 86400 { return "\(Int(sec / 3600))\(L("ч","h"))" }
+    return "\(Int((sec / 86400).rounded()))\(L("д","d"))"
+}
+
+// Знак отношения факта к потолку. Сравниваем ОКРУГЛЁННЫЕ значения,
+// чтобы знак не противоречил цифрам на экране.
+func relation(_ fact: Double, _ ceiling: Double) -> String {
+    let f = fact.rounded(), c = ceiling.rounded()
+    return f < c ? "<" : (f > c ? ">" : "=")
+}
+
+// Строка сессии: "5ч  34% < 68%  ·  1ч 37м"
+// Тот же принцип, что и у недельных, но окно пятичасовое: норма 20 % в час,
+// потолок считается пропорционально часам и минутам до сброса.
+// Пустое resets_at = окно только что открылось, впереди все 5 часов.
+func sessionText(_ s: Sample) -> String {
+    let hoursLeft = min(max((s.resets?.timeIntervalSinceNow ?? 18000) / 3600.0, 0), 5)
+    let ceiling = max(100 - 20.0 * hoursLeft, 0)
+    let mid = String(format: " %@ %2.0f%%", relation(s.percent, ceiling), ceiling)
+    return fmtRow(L("5ч","5h"), s.percent, mid, fmtLeft(s.resets))
+}
+// Строки выровнены по колонкам: тег | процент | потолок | время до сброса.
+// Средний блок занимает фиксированную ширину — чтобы время
+// у всех трёх строк стояло в одном столбце.
+func fmtRow(_ tag: String, _ pct: Double, _ mid: String, _ time: String) -> String {
+    "\(pad(tag, 6))\(String(format: "%3.0f", pct))%\(pad(mid, 7))· \(time)"
+}
+
+// Строка недельного лимита: "Fable  75% > 73%  ·  1д 22ч"
+// Вторая цифра — потолок на сейчас: линия равномерного расхода, 100 − 14.29 × дни.
+// Она одинакова для обеих строк и зависит только от времени до сброса.
+// Знак показывает отношение факта к потолку: < запас, > перебор, = ровно.
+// Сравниваем ОКРУГЛЁННЫЕ значения, чтобы знак не противоречил цифрам на экране.
+// При остатке ниже 10% потолок бессмысленен — показываем прямой остаток.
+func weeklyText(_ tag: String, _ s: Sample, _ b: Budget) -> String {
+    if s.percent >= 100 {
+        return fmtRow(tag, s.percent, "", "\(L("сброс","reset")) \(fmtLeft(s.resets))")
+    }
+    if b.lowRemainder {
+        return fmtRow(tag, s.percent, "",
+                      "\(L("ост.","left")) \(String(format: "%.0f", b.leftover))% \(L("на","for")) \(fmtLeft(s.resets))")
+    }
+    let mid = String(format: " %@ %2.0f%%", relation(s.percent, b.ceiling), b.ceiling)
+    return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
+}
+
+func pad(_ s: String, _ n: Int) -> String {
+    s.count >= n ? s : s + String(repeating: " ", count: n - s.count)
+}
+
+func fmtAgo(_ sec: TimeInterval) -> String {
+    let s = Int(sec), h = s / 3600
+    if h >= 24 { return "\(h / 24)\(L("д","d")) \(h % 24)\(L("ч","h"))" }
+    if h >= 1 { return "\(h)\(L("ч","h")) \((s % 3600) / 60)\(L("м","m"))" }
+    return "\(s / 60)\(L("м","m"))"
+}
+
+// Высота полосы со светофором. В покое окно её не занимает вовсе — стоит
+// вплотную к углу; при наведении опускается вниз на stripH и освобождает место.
+let stripH: CGFloat = 22
+
+// --- Настройки, все живут в UserDefaults ---
+enum Cfg {
+    static let d = UserDefaults.standard
+    static var mode: String { d.string(forKey: "mode") ?? "numbers" }   // numbers | bars
+    static var showSession: Bool { d.object(forKey: "showSession") == nil ? true : d.bool(forKey: "showSession") }
+    static var interval: Double { d.double(forKey: "interval") > 0 ? d.double(forKey: "interval") : 300 }
+    static var opacity: Double { d.double(forKey: "opacity") > 0 ? d.double(forKey: "opacity") : 0.88 }
+    static var fontSize: CGFloat { d.double(forKey: "fontSize") > 0 ? CGFloat(d.double(forKey: "fontSize")) : 15 }
+    static var theme: String { d.string(forKey: "theme") ?? "system" }
+    static var isDark: Bool {
+        switch theme {
+        case "dark": return true
+        case "light": return false
+        default:
+            return NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        }
+    }
+    static var bg: NSColor {
+        isDark ? NSColor(calibratedWhite: 0.09, alpha: CGFloat(opacity))
+               : NSColor(calibratedWhite: 0.97, alpha: CGFloat(opacity))
+    }
+    static func show(_ key: String) -> Bool {
+        d.object(forKey: key) == nil ? true : d.bool(forKey: key)
+    }
+    static var lang: String { d.string(forKey: "lang") ?? "system" }
+    static var collapsed: Bool { d.bool(forKey: "collapsed") }
+    static var collapsedRow: String { d.string(forKey: "collapsedRow") ?? "session" }
+    static var warnAt: Double { d.double(forKey: "warnAt") > 0 ? d.double(forKey: "warnAt") : 1.00 }
+    static var dangerAt: Double { d.double(forKey: "dangerAt") > 0 ? d.double(forKey: "dangerAt") : 0.85 }
+}
+
+// Цвета светофора: в дневной теме нужны тёмные оттенки, иначе не видно.
+enum Tone {
+    static var green: NSColor { Cfg.isDark ? .systemGreen : NSColor(srgbRed: 0.10, green: 0.48, blue: 0.20, alpha: 1) }
+    static var yellow: NSColor { Cfg.isDark ? .systemYellow : NSColor(srgbRed: 0.65, green: 0.45, blue: 0.02, alpha: 1) }
+    static var red: NSColor { Cfg.isDark ? .systemRed : NSColor(srgbRed: 0.70, green: 0.12, blue: 0.12, alpha: 1) }
+    static var gray: NSColor { Cfg.isDark ? .systemGray : NSColor(calibratedWhite: 0.35, alpha: 1) }
+}
+
+// Локализация: пара строк на месте вызова, без таблиц ключей.
+func L(_ ru: String, _ en: String) -> String {
+    switch Cfg.lang {
+    case "ru": return ru
+    case "en": return en
+    default:
+        return (Locale.preferredLanguages.first?.hasPrefix("ru") ?? false) ? ru : en
+    }
+}
+
+struct Row {
+    let tag: String
+    let percent: Double
+    let ceiling: Double
+    let color: NSColor
+    let time: String
+}
+
+extension NSImage {
+    func tinted(_ color: NSColor) -> NSImage {
+        let img = self.copy() as! NSImage
+        img.lockFocus()
+        color.set()
+        NSRect(origin: .zero, size: img.size).fill(using: .sourceAtop)
+        img.unlockFocus()
+        img.isTemplate = false
+        return img
+    }
+}
+
+final class PanelView: NSView {
+    var onClose: (() -> Void)?
+    var onMinimize: (() -> Void)?
+    var onZoom: (() -> Void)?
+    var onSettings: (() -> Void)?
+    var onHelp: (() -> Void)?
+    var onMenu: ((NSEvent) -> Void)?
+    var onHover: ((Bool) -> Void)?
+    var rows: [Row] = []
+    private(set) var hovered = false
+    var strip: CGFloat { hovered ? stripH : 0 }
+
+    override var isFlipped: Bool { true }
+
+    // Отслеживание курсора событийное: система шлёт вход и выход,
+    // никаких таймеров и перерисовки в покое.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with e: NSEvent) { hovered = true; onHover?(true) }
+    override func mouseExited(with e: NSEvent) { hovered = false; onHover?(false) }
+
+    // Светофор слева в верхней полосе: закрыть, свернуть, настройки.
+    func lights() -> [NSRect] {
+        guard hovered else { return [] }
+        let d: CGFloat = 12, gap: CGFloat = 8
+        var x = bounds.minX + 10
+        return (0..<3).map { _ -> NSRect in
+            defer { x += d + gap }
+            return NSRect(x: x, y: (stripH - d) / 2, width: d, height: d)
+        }
+    }
+
+    // Настройки и помощь — правее кружков, теми же размерами.
+    func tools() -> [NSRect] {
+        guard hovered else { return [] }
+        let d: CGFloat = 13, gap: CGFloat = 10
+        var x = bounds.minX + 10 + 12 * 3 + 8 * 2 + 14
+        return (0..<2).map { _ -> NSRect in
+            defer { x += d + gap }
+            return NSRect(x: x, y: (stripH - d) / 2, width: d, height: d)
+        }
+    }
+
+    override func draw(_ r: NSRect) {
+        let bg = Cfg.bg
+        let body = NSRect(x: 0, y: strip, width: bounds.width, height: bounds.height - strip)
+        bg.setFill()
+        NSBezierPath(roundedRect: body, xRadius: 10, yRadius: 10).fill()
+
+        if hovered {
+            bg.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: bounds.width, height: stripH - 3),
+                         xRadius: 8, yRadius: 8).fill()
+            let cols = [NSColor(srgbRed: 0.92, green: 0.34, blue: 0.33, alpha: 1),
+                        NSColor(srgbRed: 0.95, green: 0.75, blue: 0.19, alpha: 1),
+                        NSColor(srgbRed: 0.30, green: 0.78, blue: 0.35, alpha: 1)]
+            for (i, rect) in lights().enumerated() {
+                cols[i].setFill()
+                NSBezierPath(ovalIn: rect).fill()
+            }
+            let names = ["gearshape.fill", "questionmark.circle.fill"]
+            let tint = Cfg.isDark ? NSColor(calibratedWhite: 0.62, alpha: 1)
+                                  : NSColor(calibratedWhite: 0.42, alpha: 1)
+            for (i, rect) in tools().enumerated() {
+                guard let img = NSImage(systemSymbolName: names[i], accessibilityDescription: nil)
+                else { continue }
+                let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+                img.withSymbolConfiguration(cfg)?.tinted(tint).draw(in: rect)
+            }
+        }
+        if Cfg.mode == "bars" { drawBars(in: body) }
+    }
+
+    // Графический режим: дорожка, заливка по факту и риска-потолок.
+    func drawBars(in body: NSRect) {
+        let fs = Cfg.fontSize, rowH = fs + 9
+        let font = NSFont.monospacedSystemFont(ofSize: fs - 2, weight: .medium)
+        var y = body.minY + 6
+        let tagW: CGFloat = 52, barW = body.width - tagW - 74
+        for row in rows {
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: row.color]
+            NSAttributedString(string: row.tag, attributes: attrs)
+                .draw(at: NSPoint(x: 8, y: y + 1))
+
+            let track = NSRect(x: 8 + tagW, y: y + 3, width: barW, height: fs - 4)
+            (Cfg.isDark ? NSColor(calibratedWhite: 0.25, alpha: 1) : NSColor(calibratedWhite: 0.82, alpha: 1)).setFill()
+            NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
+
+            let fillW = max(track.width * CGFloat(min(row.percent, 100)) / 100, track.height)
+            row.color.setFill()
+            NSBezierPath(roundedRect: NSRect(x: track.minX, y: track.minY, width: fillW,
+                                             height: track.height),
+                         xRadius: track.height / 2, yRadius: track.height / 2).fill()
+
+            // риска потолка — где проходит линия равномерного расхода
+            let cx = track.minX + track.width * CGFloat(min(row.ceiling, 100)) / 100
+            (Cfg.isDark ? NSColor(calibratedWhite: 0.95, alpha: 0.85) : NSColor(calibratedWhite: 0.15, alpha: 0.85)).setFill()
+            NSRect(x: cx - 1, y: track.minY - 2, width: 2, height: track.height + 4).fill()
+
+            NSAttributedString(string: String(format: "%3.0f%%", row.percent), attributes: attrs)
+                .draw(at: NSPoint(x: track.maxX + 8, y: y + 1))
+            y += rowH
+        }
+    }
+
+    override func mouseDown(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        if hovered {
+            for (i, rect) in lights().enumerated() where rect.insetBy(dx: -4, dy: -4).contains(p) {
+                [onClose, onMinimize, onZoom][i]?()
+                return
+            }
+            for (i, rect) in tools().enumerated() where rect.insetBy(dx: -5, dy: -5).contains(p) {
+                [onSettings, onHelp][i]?()
+                return
+            }
+        }
+        super.mouseDown(with: e)
+    }
+    override func mouseDragged(with e: NSEvent) { window?.performDrag(with: e) }
+    override func rightMouseDown(with e: NSEvent) { onMenu?(e) }
+}
+
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    var window: NSWindow!
+    var panel: PanelView!
+    var refreshTimer: Timer?
+    let label = NSTextField(labelWithString: "…")
+    let close = NSButton(title: "×", target: nil, action: nil)
+    let claudeBundleID = "com.anthropic.claudefordesktop"
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        try? FileManager.default.removeItem(atPath: App.noAutoFlag)
+        let rect = NSRect(x: 0, y: 0, width: 372, height: 86)
+        window = NSWindow(contentRect: rect, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+
+        let v = PanelView(frame: rect)
+        label.frame = NSRect(x: 14, y: 10, width: 322, height: 70)
+        label.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .medium)
+        label.maximumNumberOfLines = 4
+        v.addSubview(label)
+
+        close.frame = NSRect(x: 344, y: 5, width: 24, height: 24)
+        close.isBordered = false
+        close.target = self
+        close.action = #selector(quit)
+        close.contentTintColor = NSColor(calibratedWhite: 0.5, alpha: 1)
+
+        v.onClose = { [weak self] in self?.toDock() }
+        v.onMinimize = { [weak self] in self?.hideUntilReturn() }
+        v.onSettings = { [weak self] in
+            guard let me = self, let e = NSApp.currentEvent else { return }
+            me.showMenu(e)
+        }
+        v.onHelp = { [weak self] in self?.showHelp() }
+        v.onZoom = { [weak self] in self?.toggleCollapse() }
+        v.onMenu = { [weak self] e in self?.showMenu(e) }
+        v.onHover = { [weak self] _ in self?.fitToContent() }
+        panel = v
+
+        window.contentView = v
+
+        // По умолчанию — левый верхний угол. Если плашку двигали, положение
+        // запоминается и восстанавливается (но только если оно на экране).
+        window.delegate = self
+        let d = UserDefaults.standard
+        var placed = false
+        if d.object(forKey: "originX") != nil, let scr = NSScreen.main {
+            let p = NSPoint(x: d.double(forKey: "originX"), y: d.double(forKey: "originY"))
+            let probe = NSRect(origin: p, size: window.frame.size)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(probe) }) {
+                window.setFrameOrigin(p); placed = true
+            }
+            _ = scr
+        }
+        if !placed {
+            window.setFrameOrigin(defaultOrigin(window.frame.size))
+        }
+        window.orderFrontRegardless()
+
+        // Показывать плашку только когда активен сам Claude
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(appActivated(_:)),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        applyVisibility(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+
+        refresh()
+        startTimer()
+        // Сторож видимости: уведомления о смене активного приложения приходят
+        // не всегда (например, при клике по рабочему столу), и окно могло
+        // остаться скрытым до следующего обновления через 5 минут.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in self.syncVisibility() }
+    }
+
+    func startTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: Cfg.interval,
+                                            repeats: true) { _ in self.refresh() }
+    }
+
+    var shouldBeVisible: Bool {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if docked { return false }          // возвращается только кликом по иконке в доке
+        if hidden {
+            // Сначала нужно уйти из Claude, иначе плашка вернулась бы через две
+            // секунды после нажатия — режим был бы бесполезен.
+            if front != claudeBundleID && front != Bundle.main.bundleIdentifier {
+                leftClaudeSinceHide = true
+            }
+            if leftClaudeSinceHide && front == claudeBundleID {
+                hidden = false
+                leftClaudeSinceHide = false
+            } else {
+                return false
+            }
+        }
+        return front == claudeBundleID || (front != nil && front == Bundle.main.bundleIdentifier)
+    }
+
+    func syncVisibility() {
+        if shouldBeVisible && !window.isVisible {
+            refresh()
+            window.orderFrontRegardless()
+        } else if !shouldBeVisible && window.isVisible {
+            window.orderOut(nil)
+        }
+        if window.isVisible { rescueOffscreen() }
+    }
+
+    // Запоминаем, куда пользователь перетащил плашку.
+    func windowDidMove(_ n: Notification) {
+        let d = UserDefaults.standard
+        d.set(Double(window.frame.origin.x), forKey: "originX")
+        d.set(Double(window.frame.origin.y), forKey: "originY")
+    }
+
+    // Окно могло остаться за пределами видимой области: отключили внешний
+    // монитор, поменялось разрешение, сон-пробуждение. Процесс при этом жив
+    // и «показан», но на экране его нет. Возвращаем в левый верхний угол.
+    func rescueOffscreen() {
+        let f = window.frame
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
+        guard !onScreen else { return }
+        window.setFrameOrigin(defaultOrigin(f.size))
+        window.orderFrontRegardless()
+    }
+
+    @objc func appActivated(_ n: Notification) {
+        let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        applyVisibility(app?.bundleIdentifier)
+    }
+
+    func applyVisibility(_ bundleID: String?) {
+        // Своё приложение тоже считаем «своим»: при перетаскивании плашки
+        // активной становится она сама, и без этой проверки она пряталась
+        // прямо под курсором в момент перетаскивания.
+        let mine = Bundle.main.bundleIdentifier
+        if bundleID == claudeBundleID || (bundleID != nil && bundleID == mine) {
+            refresh()
+            window.orderFrontRegardless()
+        } else {
+            window.orderOut(nil)
+        }
+    }
+
+    // Зелёная кнопка — сжать плашку до одной строки и обратно.
+    @objc func toggleCollapse() {
+        Cfg.d.set(!Cfg.collapsed, forKey: "collapsed")
+        refresh()
+    }
+
+    // Какие строки показывать: в свёрнутом виде только одну, выбранную в меню.
+    func allow(_ id: String) -> Bool {
+        if Cfg.collapsed { return Cfg.collapsedRow == id }
+        switch id {
+        case "session": return Cfg.show("showSession")
+        case "all": return Cfg.show("showAll")
+        default: return Cfg.show("showScoped")
+        }
+    }
+
+    @objc func quit() { NSApp.terminate(nil) }
+
+    // «Выйти» — совсем: наблюдатель не поднимет. Флаг снимается при
+    // ручном запуске приложения.
+    static let noAutoFlag = NSString(string: "~/.overlimit/no-autostart").expandingTildeInPath
+
+    @objc func quitForever() {
+        FileManager.default.createFile(atPath: App.noAutoFlag, contents: nil)
+        NSApp.terminate(nil)
+    }
+
+    @objc func showHelp() {
+        let a = NSAlert()
+        a.messageText = L("Плашка расхода лимитов Claude", "Claude usage panel")
+        a.informativeText = L("""
+        Строки: сессия 5ч, недельный общий, недельный по модели.
+
+        Формат: факт | знак | потолок | время до сброса.
+        Потолок — где проходит линия равномерного расхода: 100 − норма × время.
+        Знак < значит запас, > перебор, = ровно по графику.
+
+        Цвет недельных строк — по темпу: сколько можно тратить в день до сброса,
+        в сравнении с нормой 14,29 п.п. Сессия красится по остатку.
+
+        Кнопки при наведении: красная — в док, жёлтая — скрыть до возврата
+        в Claude, зелёная — свернуть до одной строки. Рядом шестерёнка и помощь.
+
+        Правый клик — настройки. Перетаскивание запоминается,
+        «Вернуть на место» ставит плашку в выбранный угол.
+
+        Данные обновляет фоновый агент. Если сбор встанет,
+        появится строка «данные устарели».
+        """, """
+        Rows: 5h session, weekly total, weekly per model.
+
+        Format: actual | sign | ceiling | time to reset.
+        Ceiling is the even-pace line: 100 − norm × time remaining.
+        Sign < means you are under it, > over it, = exactly on pace.
+
+        Weekly rows are coloured by pace: how much you may spend per day
+        until reset, against the 14.29 pp norm. The session row uses remaining.
+
+        Hover buttons: red sends to Dock, yellow hides until you return
+        to Claude, green collapses to one row. Then gear and help.
+
+        Right-click opens settings. Dragging is remembered;
+        "Reset position" puts the panel back in the chosen corner.
+
+        A background agent refreshes the data. If it stalls,
+        a "data is stale" row appears.
+        """)
+        a.addButton(withTitle: "Понятно")
+        NSApp.activate(ignoringOtherApps: true)
+        a.runModal()
+    }
+
+    // --- Два состояния «убрать» ---
+    // docked  (красный): процесс жив, иконка в доке, сам не возвращается —
+    //                    только кликом по иконке в доке.
+    // hidden  (жёлтый):  процесс жив, иконки нигде нет, вернётся сам
+    //                    при следующем переключении в Claude.
+    var docked = false
+    var hidden = false
+    var leftClaudeSinceHide = false
+
+    // Первое нажатие: прячем в док и через 15 минут возвращаем — один раз.
+    // Второе подряд: остаётся в доке насовсем, до клика по иконке.
+    var dockPresses = 0
+    var dockTimer: Timer?
+
+    @objc func toDock() {
+        docked = true; hidden = false
+        window.orderOut(nil)
+        NSApp.setActivationPolicy(.regular)
+        dockTimer?.invalidate()
+        if dockPresses == 0 {
+            dockTimer = Timer.scheduledTimer(withTimeInterval: 900, repeats: false) { _ in
+                self.restore()
+                self.dockPresses = 1        // возврат был, следующий раз — насовсем
+            }
+        }
+        dockPresses += 1
+    }
+
+    @objc func hideUntilReturn() {
+        hidden = true; docked = false
+        leftClaudeSinceHide = false
+        window.orderOut(nil)
+    }
+
+    func restore() {
+        dockTimer?.invalidate()
+        docked = false; hidden = false
+        NSApp.setActivationPolicy(.accessory)
+        refresh()
+        window.orderFrontRegardless()
+    }
+
+    // Клик по иконке в доке — осознанный возврат, счётчик обнуляем.
+    func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool {
+        dockPresses = 0
+        restore()
+        return true
+    }
+
+    // --- Место по умолчанию ---
+    // Угол выбирается в меню. Перетаскивание запоминается и живёт до тех пор,
+    // пока не нажмёшь «Вернуть на место».
+    func defaultOrigin(_ size: NSSize) -> NSPoint {
+        guard let scr = NSScreen.main else { return .zero }
+        let vf = scr.visibleFrame, m: CGFloat = 2
+        switch UserDefaults.standard.string(forKey: "corner") ?? "topLeft" {
+        case "topRight":    return NSPoint(x: vf.maxX - size.width - m, y: vf.maxY - size.height - m)
+        case "bottomLeft":  return NSPoint(x: vf.minX + m, y: vf.minY + m)
+        case "bottomRight": return NSPoint(x: vf.maxX - size.width - m, y: vf.minY + m)
+        default:            return NSPoint(x: vf.minX + m, y: vf.maxY - size.height - m)
+        }
+    }
+
+    @objc func resetPosition() {
+        UserDefaults.standard.removeObject(forKey: "originX")
+        UserDefaults.standard.removeObject(forKey: "originY")
+        window.setFrameOrigin(defaultOrigin(window.frame.size))
+    }
+
+    @objc func setCorner(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.representedObject as? String ?? "topLeft", forKey: "corner")
+        resetPosition()
+    }
+
+    // Универсальный переключатель настройки: пишет значение и перерисовывает.
+    @objc func pick(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String: Any],
+              let key = pair["k"] as? String else { return }
+        Cfg.d.set(pair["v"], forKey: key)
+        if key == "interval" { startTimer() }
+        refresh()
+    }
+
+    @objc func toggleRow(_ sender: NSMenuItem) {
+        guard let k = sender.representedObject as? String else { return }
+        Cfg.d.set(!Cfg.show(k), forKey: k)
+        refresh()
+    }
+
+    // Ручной ввод значения для любой числовой настройки.
+    @objc func manual(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: Any],
+              let key = info["k"] as? String else { return }
+        let a = NSAlert()
+        a.messageText = (info["t"] as? String) ?? L("Значение","Value")
+        a.informativeText = (info["h"] as? String) ?? ""
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        tf.stringValue = String(format: "%g", Cfg.d.double(forKey: key))
+        a.accessoryView = tf
+        a.addButton(withTitle: "OK"); a.addButton(withTitle: "Отмена")
+        NSApp.activate(ignoringOtherApps: true)
+        if a.runModal() == .alertFirstButtonReturn,
+           let v = Double(tf.stringValue.replacingOccurrences(of: ",", with: ".")), v > 0 {
+            Cfg.d.set(v, forKey: key)
+            if key == "interval" { startTimer() }
+            refresh()
+        }
+    }
+
+    func sub(_ title: String, _ key: String, _ opts: [(String, Any)],
+             _ current: Any, manual manualHint: String? = nil,
+             display: String? = nil) -> NSMenuItem {
+        let shown = display ?? "\(current)"
+        let item = NSMenuItem(title: "\(title): \(shown)", action: nil, keyEquivalent: "")
+        let menu = NSMenu()
+        for (label, value) in opts {
+            let it = NSMenuItem(title: label, action: #selector(pick(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = ["k": key, "v": value]
+            it.state = "\(value)" == "\(current)" ? .on : .off
+            menu.addItem(it)
+        }
+        if let hint = manualHint {
+            menu.addItem(.separator())
+            let mi = NSMenuItem(title: L("Ввести вручную…","Enter manually…"), action: #selector(manual(_:)),
+                                keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = ["k": key, "t": title, "h": hint]
+            menu.addItem(mi)
+        }
+        item.submenu = menu
+        return item
+    }
+
+    @objc func showMenu(_ e: NSEvent) {
+        let m = NSMenu()
+        m.addItem(sub(L("Вид","View"), "mode", [(L("Цифры","Numbers"), "numbers"), (L("Бары","Bars"), "bars")], Cfg.mode,
+                      display: Cfg.mode == "bars" ? L("бары","bars") : L("цифры","numbers")))
+
+        let rowsItem = NSMenuItem(title: L("Показывать строки","Rows shown"), action: nil, keyEquivalent: "")
+        let rowsMenu = NSMenu()
+        for (title, key) in [(L("Сессия 5ч","5h session"), "showSession"), (L("Все модели","All models"), "showAll"),
+                             (L("По модели","Per model"), "showScoped")] {
+            let it = NSMenuItem(title: title, action: #selector(toggleRow(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = key
+            it.state = Cfg.show(key) ? .on : .off
+            rowsMenu.addItem(it)
+        }
+        rowsItem.submenu = rowsMenu
+        m.addItem(rowsItem)
+
+        m.addItem(sub(L("В свёрнутом виде","When collapsed"), "collapsedRow",
+                      [(L("Сессия 5ч","5h session"), "session"), (L("Все модели","All models"), "all"), (L("По модели","Per model"), "scoped")],
+                      Cfg.collapsedRow,
+                      display: ["session": L("сессия 5ч","5h session"),
+                                "all": L("все модели","all models"),
+                                "scoped": L("по модели","per model")][Cfg.collapsedRow]
+                               ?? L("сессия 5ч","5h session")))
+        m.addItem(sub(L("Язык","Language"), "lang",
+                      [(L("Как в системе","Match system"), "system"),
+                       ("Русский", "ru"), ("English", "en")], Cfg.lang,
+                      display: ["system": L("как в системе","match system"),
+                                "ru": "русский", "en": "english"][Cfg.lang]
+                               ?? L("как в системе","match system")))
+        m.addItem(sub(L("Тема","Theme"), "theme",
+                      [(L("Как в системе","Match system"), "system"), (L("Дневная","Light"), "light"), (L("Ночная","Dark"), "dark")],
+                      Cfg.theme,
+                      display: ["system": L("как в системе","match system"),
+                                "light": L("дневная","light"),
+                                "dark": L("ночная","dark")][Cfg.theme]
+                               ?? L("как в системе","match system")))
+        m.addItem(sub(L("Размер шрифта","Font size"), "fontSize",
+                      [("11", 11.0), ("12", 12.0), ("13", 13.0), ("15", 15.0),
+                       ("17", 17.0), ("20", 20.0), ("24", 24.0)],
+                      Cfg.fontSize, manual: L("Размер в пунктах, например 16","Point size, e.g. 16"),
+                      display: String(format: "%g pt", Cfg.fontSize)))
+        m.addItem(sub(L("Прозрачность","Opacity"), "opacity",
+                      [(L("Плотная","Solid"), 1.0), (L("Обычная","Normal"), 0.88), (L("Лёгкая","Light"), 0.7), (L("Призрак","Ghost"), 0.5)],
+                      Cfg.opacity, manual: L("От 0.2 до 1.0","From 0.2 to 1.0"),
+                      display: String(format: "%g", Cfg.opacity)))
+        m.addItem(sub(L("Интервал обновления","Refresh interval"), "interval",
+                      [(L("1 мин","1 min"), 60.0), (L("5 мин","5 min"), 300.0), (L("15 мин","15 min"), 900.0)], Cfg.interval,
+                      manual: L("В секундах, не меньше 60","Seconds, at least 60"),
+                      display: "\(Int(Cfg.interval / 60)) \(L("мин","min"))"))
+        m.addItem(sub(L("Порог жёлтого","Yellow threshold"), "warnAt",
+                      [(L("1.00 — по потолку","1.00 — at ceiling"), 1.0), ("0.95", 0.95), ("0.90", 0.90)], Cfg.warnAt,
+                      manual: L("Доля от нормы, например 0.95","Share of norm, e.g. 0.95"),
+                      display: String(format: "%.2f", Cfg.warnAt)))
+        m.addItem(sub(L("Порог красного","Red threshold"), "dangerAt",
+                      [("0.90", 0.90), ("0.85", 0.85), ("0.80", 0.80)], Cfg.dangerAt,
+                      manual: L("Доля от нормы, например 0.82","Share of norm, e.g. 0.82"),
+                      display: String(format: "%.2f", Cfg.dangerAt)))
+        m.addItem(.separator())
+
+        let cornerItem = NSMenuItem(title: L("Угол по умолчанию","Default corner"), action: nil, keyEquivalent: "")
+        let subM = NSMenu()
+        let cur = Cfg.d.string(forKey: "corner") ?? "topLeft"
+        for (title, key) in [(L("Слева вверху","Top left"), "topLeft"), (L("Справа вверху","Top right"), "topRight"),
+                             (L("Слева внизу","Bottom left"), "bottomLeft"), (L("Справа внизу","Bottom right"), "bottomRight")] {
+            let it = NSMenuItem(title: title, action: #selector(setCorner(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = key
+            it.state = key == cur ? .on : .off
+            subM.addItem(it)
+        }
+        cornerItem.submenu = subM
+        m.addItem(cornerItem)
+        let ret = NSMenuItem(title: L("Вернуть на место","Reset position"), action: #selector(resetPosition),
+                             keyEquivalent: "")
+        ret.target = self
+        m.addItem(ret)
+        m.addItem(.separator())
+
+        for (title, sel) in [(L("Убрать в док","Send to Dock"), #selector(toDock)),
+                             (L("Скрыть до возврата в Claude","Hide until back in Claude"), #selector(hideUntilReturn)),
+                             (Cfg.collapsed ? L("Развернуть","Expand") : L("Свернуть до одной строки","Collapse to one row"),
+                              #selector(toggleCollapse)),
+                             (L("Помощь","Help"), #selector(showHelp)),
+                             (L("Выйти","Quit"), #selector(quitForever))] {
+            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            it.target = self
+            m.addItem(it)
+        }
+        NSMenu.popUpContextMenu(m, with: e, for: window.contentView!)
+    }
+
+    // --- Настройки ---
+    var settingsWin: NSWindow?
+
+    @objc func openSettings() {
+        if let w = settingsWin { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 150),
+                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "Настройки плашки"
+        w.isReleasedWhenClosed = false
+
+        let d = UserDefaults.standard
+        let mode = NSPopUpButton(frame: NSRect(x: 150, y: 100, width: 170, height: 25))
+        mode.addItems(withTitles: ["в док", "до переключения"])
+        mode.selectItem(at: d.string(forKey: "minimizeMode") == "switch" ? 1 : 0)
+        mode.target = self; mode.action = #selector(setMinimizeMode(_:))
+
+        let lbl = NSTextField(labelWithString: "Свернуть:")
+        lbl.frame = NSRect(x: 20, y: 104, width: 120, height: 18)
+
+        let note = NSTextField(wrappingLabelWithString:
+            "Остальные настройки — пороги светофора, интервал, прозрачность, шрифт, вид строк — добавляются следующим шагом.")
+        note.frame = NSRect(x: 20, y: 20, width: 300, height: 60)
+        note.font = NSFont.systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+
+        w.contentView?.addSubview(lbl)
+        w.contentView?.addSubview(mode)
+        w.contentView?.addSubview(note)
+        w.center()
+        settingsWin = w
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func setMinimizeMode(_ sender: NSPopUpButton) {
+        UserDefaults.standard.set(sender.indexOfSelectedItem == 1 ? "switch" : "dock",
+                                  forKey: "minimizeMode")
+    }
+
+    func windowWillClose(_ n: Notification) {
+        if (n.object as? NSWindow) === settingsWin, !docked {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    // Стиль абзаца с запретом переноса. У многострочного NSTextField свойства
+    // поля (lineBreakMode / wraps) не действуют — перенос управляется отсюда.
+    static let noWrap: NSParagraphStyle = {
+        let p = NSMutableParagraphStyle()
+        p.lineBreakMode = .byClipping
+        return p
+    }()
+
+    func line(_ text: String, _ c: NSColor, size: CGFloat = 15) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .foregroundColor: c,
+            .paragraphStyle: App.noWrap,
+            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .medium)])
+    }
+
+    func refresh() {
+        let all = loadSamples()
+        let out = NSMutableAttributedString()
+        let grayFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+
+        guard let newest = all.map({ $0.ts }).max() else {
+            label.attributedStringValue = NSAttributedString(
+                string: L("нет данных\nпроверь launchd-агент", "no data\ncheck launchd agent"),
+                attributes: [.foregroundColor: NSColor.systemGray, .font: grayFont])
+            return
+        }
+        let cur = all.filter { abs($0.ts.timeIntervalSince(newest)) < 1 }
+        var rows: [Row] = []
+
+        // 1. Пятичасовая сессия — потолок по часам, цвет по остатку
+        if allow("session"), let s = cur.first(where: { $0.kind == "session" }) {
+            out.append(line(sessionText(s) + "\n", sessionColor(s.percent)))
+            let hl = min(max((s.resets?.timeIntervalSinceNow ?? 18000) / 3600.0, 0), 5)
+            rows.append(Row(tag: L("5ч","5h"), percent: s.percent, ceiling: max(100 - 20 * hl, 0),
+                            color: sessionColor(s.percent), time: fmtLeft(s.resets)))
+        }
+
+        // 2-3. Недельные лимиты — по суточному бюджету, цвет говорит сам за себя
+        var weeklies: [(String, Sample)] = []
+        if allow("all"), let a = cur.first(where: { $0.kind == "weekly_all" }) { weeklies.append((L("Все","All"), a)) }
+        if allow("scoped"),
+           let m = cur.filter({ $0.kind == "weekly_scoped" }).max(by: { $0.percent < $1.percent }) {
+            weeklies.append((m.model.isEmpty ? L("модель","model") : String(m.model.prefix(6)), m))
+        }
+        for (i, item) in weeklies.enumerated() {
+            guard let b = budget(item.1) else { continue }
+            let tail = i == weeklies.count - 1 ? "" : "\n"
+            out.append(line(weeklyText(item.0, item.1, b) + tail, weeklyColor(b)))
+            rows.append(Row(tag: item.0, percent: item.1.percent, ceiling: b.ceiling,
+                            color: weeklyColor(b), time: fmtLeft(item.1.resets)))
+        }
+        panel.rows = rows
+
+        // Четвёртой строки нет: цвет строк сам сигнализирует.
+        // Исключение — сбор данных встал, об этом молчать нельзя.
+        let age = Date().timeIntervalSince(newest)
+        if age > 900 {
+            out.append(line("\n⚠︎ \(L("данные устарели","data is stale")): \(fmtAgo(age))", .systemOrange, size: 13))
+        }
+        label.attributedStringValue = out
+        fitToContent()
+    }
+
+    // Ширина окна подгоняется под самую длинную строку.
+    // ВАЖНО: size() у NSAttributedString меряет текст как одну строку и игнорирует
+    // переносы — ширина выходит заниженной, текст начинает заворачиваться.
+    // Мерить нужно через boundingRect с .usesLineFragmentOrigin.
+    func fitToContent() {
+        let padL: CGFloat = 8, padY: CGFloat = 4
+        let padR: CGFloat = 4
+        let strip = panel?.strip ?? 0
+        var w: CGFloat, h: CGFloat, textW: CGFloat = 0, textH: CGFloat = 0
+
+        if Cfg.mode == "bars" {
+            label.isHidden = true
+            w = 250
+            h = (Cfg.fontSize + 9) * CGFloat(max(panel.rows.count, 1)) + 12 + strip
+        } else {
+            label.isHidden = false
+            label.font = NSFont.monospacedSystemFont(ofSize: Cfg.fontSize, weight: .medium)
+            let huge = NSSize(width: CGFloat(10000), height: CGFloat(10000))
+            let r = label.attributedStringValue.boundingRect(with: huge,
+                                                             options: [.usesLineFragmentOrigin])
+            textW = ceil(r.width) + 12      // запас: ячейка поля добавляет свои врезки
+            textH = ceil(r.height) + 4
+            w = textW + padL + padR
+            h = textH + padY * 2 + strip
+            label.frame = NSRect(x: padL, y: padY + strip, width: textW, height: textH)
+        }
+        panel?.needsDisplay = true
+
+        var f = window.frame
+        guard abs(f.size.width - w) > 0.5 || abs(f.size.height - h) > 0.5 else { return }
+        f.origin.y += f.size.height - h        // верхний край на месте
+        f.size = NSSize(width: w, height: h)
+
+        // Не даём окну уехать за край: после перетаскивания к границе экрана
+        // рост ширины мог вытолкнуть его за пределы видимой области.
+        if let scr = window.screen ?? NSScreen.main {
+            let vf = scr.visibleFrame
+            f.origin.x = min(max(f.origin.x, vf.minX), max(vf.maxX - w, vf.minX))
+            f.origin.y = min(max(f.origin.y, vf.minY), max(vf.maxY - h, vf.minY))
+        }
+
+        window.setFrame(f, display: true)
+        window.contentView?.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        window.contentView?.needsDisplay = true
+    }
+}
+
+let app = NSApplication.shared
+let delegate = App()
+app.delegate = delegate
+app.run()
