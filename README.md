@@ -8,11 +8,10 @@ usage screen does not: **at this pace, will my weekly limit last until reset?**
 > Unofficial. Not affiliated with, endorsed by, or sponsored by Anthropic.
 > Claude is a trademark of Anthropic, PBC.
 
-```
-5ч     12% < 35%   ·  3ч 15м
-Все    63% < 72%   ·  1д 22ч
-Fable  75% > 72%   ·  1д 22ч
-```
+![The panel, hovered, showing the traffic lights and the utility buttons](docs/panel.png)
+
+Every row reads the same way: **actual | sign | ceiling | time until reset**.
+Above, all three are under the even-pace line, so everything is green.
 
 ## Why not just look at the remaining percentage
 
