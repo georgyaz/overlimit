@@ -48,7 +48,7 @@ Requires macOS 13+, Xcode Command Line Tools, and Claude Code signed in
 (the panel reads its token — see [How it works](#how-it-works)).
 
 ```sh
-git clone https://github.com/YOURNAME/overlimit.git
+git clone https://github.com/georgyaz/overlimit.git
 cd overlimit
 ./install.sh
 ```
