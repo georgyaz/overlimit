@@ -207,14 +207,19 @@ enum Tone {
     static var gray: NSColor { Cfg.isDark ? .systemGray : NSColor(calibratedWhite: 0.35, alpha: 1) }
 }
 
-// Localisation: a pair of strings at the call site, no key tables.
+// Localisation. Call sites stay `L(ru, en)`; other languages are looked up in
+// TR by the English string, falling back to English when a phrase is missing.
+// That keeps one table instead of touching fifty call sites.
+func systemLang() -> String {
+    guard let code = Locale.preferredLanguages.first?.prefix(2).lowercased() else { return "en" }
+    return ["ru", "fr", "es", "pt", "zh"].contains(String(code)) ? String(code) : "en"
+}
+
 func L(_ ru: String, _ en: String) -> String {
-    switch Cfg.lang {
-    case "ru": return ru
-    case "en": return en
-    default:
-        return (Locale.preferredLanguages.first?.hasPrefix("ru") ?? false) ? ru : en
-    }
+    let lang = Cfg.lang == "system" ? systemLang() : Cfg.lang
+    if lang == "ru" { return ru }
+    if lang == "en" { return en }
+    return TR[en]?[lang] ?? en
 }
 
 struct Row {
@@ -548,7 +553,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func showHelp() {
         let a = NSAlert()
-        a.messageText = L("Плашка расхода лимитов Claude", "Claude usage panel")
+        a.messageText = "Overlimit"
         a.informativeText = L("""
         Строки: сессия 5ч, недельный общий, недельный по модели.
 
@@ -586,7 +591,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         A background agent refreshes the data. If it stalls,
         a "data is stale" row appears.
         """)
-        a.addButton(withTitle: "Понятно")
+        a.addButton(withTitle: L("Понятно","Got it"))
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
     }
@@ -690,7 +695,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         tf.stringValue = String(format: "%g", Cfg.d.double(forKey: key))
         a.accessoryView = tf
-        a.addButton(withTitle: "OK"); a.addButton(withTitle: "Отмена")
+        a.addButton(withTitle: "OK"); a.addButton(withTitle: L("Отмена","Cancel"))
         NSApp.activate(ignoringOtherApps: true)
         if a.runModal() == .alertFirstButtonReturn,
            let v = Double(tf.stringValue.replacingOccurrences(of: ",", with: ".")), v > 0 {
@@ -786,9 +791,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                       display: Cfg.statusBar ? L("показывать","shown") : L("скрыта","hidden")))
         m.addItem(sub(L("Язык","Language"), "lang",
                       [(L("Как в системе","Match system"), "system"),
-                       ("Русский", "ru"), ("English", "en")], Cfg.lang,
-                      display: ["system": L("как в системе","match system"),
-                                "ru": "русский", "en": "english"][Cfg.lang]
+                       ("English", "en"), ("Русский", "ru"), ("Français", "fr"),
+                       ("Español", "es"), ("Português", "pt"), ("中文", "zh")], Cfg.lang,
+                      display: ["system": L("как в системе","match system"), "en": "english",
+                                "ru": "русский", "fr": "français", "es": "español",
+                                "pt": "português", "zh": "中文"][Cfg.lang]
                                ?? L("как в системе","match system")))
         m.addItem(sub(L("Тема","Theme"), "theme",
                       [(L("Как в системе","Match system"), "system"), (L("Дневная","Light"), "light"), (L("Ночная","Dark"), "dark")],
@@ -1009,8 +1016,3 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentView?.needsDisplay = true
     }
 }
-
-let app = NSApplication.shared
-let delegate = App()
-app.delegate = delegate
-app.run()

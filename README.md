@@ -67,10 +67,10 @@ gear and a help button.
 to show, language, theme, font size, opacity, refresh interval, both colour
 thresholds, default corner. Numeric settings accept a manual value.
 
-The interface is available in English and Russian, following the system
-language by default. Adding a third one means turning the `L(ru, en)` helper
-into a dictionary — if you want your language in here, open an issue and say
-which one; that is more useful than a guess.
+The interface speaks English, Russian, French, Spanish, Portuguese and
+Chinese, following the system language by default. Adding another one means a
+block in `Sources/Translations.swift` keyed by the English string — anything
+missing quietly falls back to English, so a partial translation is fine.
 
 ## How it works
 

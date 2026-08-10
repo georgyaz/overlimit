@@ -5,11 +5,12 @@ requests — often more useful, because they say what people actually need.
 
 ## Good first things
 
-**Add a language.** The `L(ru, en)` helper in `Sources/Overlimit.swift` takes
-exactly two strings, which is fine for two languages and wrong for three. If
-you want a third, the honest fix is turning it into a dictionary keyed by
-language code. Open an issue with the language you need before doing the work —
-if nobody else asks for it, a simpler patch may be enough.
+**Add a language.** Six are shipped: English, Russian, French, Spanish,
+Portuguese, Chinese. Adding one is a block in `Sources/Translations.swift`,
+keyed by the English string, plus an entry in the language submenu in
+`showMenu`. Missing phrases fall back to English, so you can translate the
+menu first and the help text later. Native speakers welcome — the current
+non-English strings past Russian have not been reviewed by one.
 
 **Report what breaks.** This tool depends on an undocumented endpoint and on
 where Claude Code keeps its credentials. Both can change without notice. If
@@ -23,7 +24,7 @@ of the keychain entry or anything starting with `sk-ant-`.
 No package manager, no dependencies:
 
 ```sh
-swiftc -O -o /tmp/overlimit Sources/Overlimit.swift
+swiftc -O -o /tmp/overlimit Sources/*.swift
 ```
 
 `./install.sh` does the same and assembles the bundle, icon and launchd agents.

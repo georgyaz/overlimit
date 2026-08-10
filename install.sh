@@ -19,10 +19,10 @@ fi
 
 echo "==> building app"
 mkdir -p "$DIR" "$APP/Contents/MacOS" "$APP/Contents/Resources" "$AGENTS"
-swiftc -O -o "$DIR/overlimit" "$REPO/Sources/Overlimit.swift"
+swiftc -O -o "$DIR/overlimit" "$REPO"/Sources/*.swift
 
 echo "==> building icon"
-swiftc -O -o "$DIR/make-icon" "$REPO/Sources/MakeIcon.swift"
+swiftc -O -o "$DIR/make-icon" "$REPO/Tools/MakeIcon.swift"
 rm -rf "$DIR/AppIcon.iconset"
 "$DIR/make-icon" "$DIR/AppIcon.iconset" >/dev/null
 iconutil -c icns "$DIR/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
