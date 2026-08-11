@@ -108,9 +108,16 @@ def parse(s):
 
 
 for key, old in prev.items():
-    new_r, old_r = parse(now_resets.get(key) or ""), parse(old["resets_at"])
+    raw_new = now_resets.get(key) or ""
+    new_r, old_r = parse(raw_new), parse(old["resets_at"])
+    if not old_r:
+        continue
+    # At rollover the API returns an EMPTY resets_at before publishing the new
+    # one, so "empty now, filled before" is itself a rollover. Missing this is
+    # how the first real reset went unrecorded.
+    rolled = (not raw_new) or (new_r and abs((new_r - old_r).total_seconds()) > 3600)
     # fractional seconds in resets_at differ on every call - compare with tolerance
-    if new_r and old_r and abs((new_r - old_r).total_seconds()) > 3600:
+    if rolled:
         closed.append({"window_end": old["resets_at"], "kind": key[0],
                        "model": key[1], "final_percent": old["percent"],
                        "logged_at": datetime.datetime.now(datetime.timezone.utc)
