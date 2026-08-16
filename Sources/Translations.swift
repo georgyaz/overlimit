@@ -133,4 +133,7 @@ let TR: [String: [String: String]] = [
                  "pt": "O mais apertado", "zh": "最紧张的"],
     "tightest": ["fr": "le plus serré", "es": "el más ajustado",
                  "pt": "o mais apertado", "zh": "最紧张的"],
+    "Put away": ["fr": "Ranger", "es": "Guardar", "pt": "Guardar", "zh": "收起"],
+    "Settings": ["fr": "Réglages", "es": "Ajustes", "pt": "Ajustes", "zh": "设置"],
+    "Position": ["fr": "Position", "es": "Posición", "pt": "Posição", "zh": "位置"],
 ]

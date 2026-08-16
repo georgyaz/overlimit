@@ -676,7 +676,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func pick(_ sender: NSMenuItem) {
         guard let pair = sender.representedObject as? [String: Any],
               let key = pair["k"] as? String else { return }
-        Cfg.d.set(pair["v"], forKey: key)
+        // "menuBar" is one control over two stored values: visibility and choice.
+        if key == "menuBar" {
+            let v = pair["v"] as? String ?? "auto"
+            Cfg.d.set(v != "off", forKey: "statusBar")
+            if v != "off" { Cfg.d.set(v, forKey: "statusRow") }
+        } else {
+            Cfg.d.set(pair["v"], forKey: key)
+        }
         if key == "interval" { startTimer() }
         refresh()
     }
@@ -770,14 +777,44 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSMenu.popUpContextMenu(buildMenu(), with: e, for: window.contentView!)
     }
 
+    // Menu is grouped by how often each entry is used: actions first, then the
+    // three settings that change what you see, then the rest behind submenus.
+    func item(_ title: String, _ sel: Selector) -> NSMenuItem {
+        let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        it.target = self
+        return it
+    }
+
+    func group(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        items.forEach { sub.addItem($0) }
+        parent.submenu = sub
+        return parent
+    }
+
     func buildMenu() -> NSMenu {
         let m = NSMenu()
-        m.addItem(sub(L("Вид","View"), "mode", [(L("Цифры","Numbers"), "numbers"), (L("Бары","Bars"), "bars")], Cfg.mode,
+
+        m.addItem(group(L("Убрать плашку", "Put away"), [
+            item(Cfg.collapsed ? L("Развернуть","Expand")
+                               : L("Свернуть до одной строки","Collapse to one row"),
+                 #selector(toggleCollapse)),
+            item(L("Скрыть до возврата в Claude","Hide until back in Claude"),
+                 #selector(hideUntilReturn)),
+            item(L("Убрать в док","Send to Dock"), #selector(toDock)),
+        ]))
+        m.addItem(.separator())
+
+        m.addItem(sub(L("Вид","View"), "mode", [(L("Цифры","Numbers"), "numbers"),
+                      (L("Бары","Bars"), "bars")], Cfg.mode,
                       display: Cfg.mode == "bars" ? L("бары","bars") : L("цифры","numbers")))
 
-        let rowsItem = NSMenuItem(title: L("Показывать строки","Rows shown"), action: nil, keyEquivalent: "")
+        let rowsItem = NSMenuItem(title: L("Показывать строки","Rows shown"),
+                                  action: nil, keyEquivalent: "")
         let rowsMenu = NSMenu()
-        for (title, key) in [(L("Сессия 5ч","5h session"), "showSession"), (L("Все модели","All models"), "showAll"),
+        for (title, key) in [(L("Сессия 5ч","5h session"), "showSession"),
+                             (L("Все модели","All models"), "showAll"),
                              (L("По модели","Per model"), "showScoped")] {
             let it = NSMenuItem(title: title, action: #selector(toggleRow(_:)), keyEquivalent: "")
             it.target = self
@@ -788,99 +825,83 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rowsItem.submenu = rowsMenu
         m.addItem(rowsItem)
 
-        m.addItem(sub(L("В свёрнутом виде","When collapsed"), "collapsedRow",
-                      [(L("Сессия 5ч","5h session"), "session"), (L("Все модели","All models"), "all"), (L("По модели","Per model"), "scoped")],
-                      Cfg.collapsedRow,
-                      display: ["session": L("сессия 5ч","5h session"),
-                                "all": L("все модели","all models"),
-                                "scoped": L("по модели","per model")][Cfg.collapsedRow]
-                               ?? L("сессия 5ч","5h session")))
-        m.addItem(sub(L("В строке меню","Menu bar"), "statusBar",
-                      [(L("Показывать","Show"), true), (L("Скрыть","Hide"), false)],
-                      Cfg.statusBar,
-                      display: Cfg.statusBar ? L("показывать","shown") : L("скрыта","hidden")))
-        if Cfg.statusBar {
-            m.addItem(sub(L("В строке меню показывать","Menu bar shows"), "statusRow",
-                          [(L("Самый напряжённый","Tightest"), "auto"),
-                           (L("Сессия 5ч","5h session"), "session"),
-                           (L("Все модели","All models"), "all"),
-                           (L("По модели","Per model"), "scoped")], Cfg.statusRow,
-                          display: ["auto": L("самый напряжённый","tightest"),
-                                    "session": L("сессия 5ч","5h session"),
-                                    "all": L("все модели","all models"),
-                                    "scoped": L("по модели","per model")][Cfg.statusRow]
-                                   ?? L("самый напряжённый","tightest")))
-        }
-        m.addItem(sub(L("Язык","Language"), "lang",
-                      // ordered by the English name of each language
-                      [(L("Как в системе","Match system"), "system"),
-                       ("中文", "zh"), ("English", "en"), ("Français", "fr"),
-                       ("Português", "pt"), ("Русский", "ru"), ("Español", "es")], Cfg.lang,
-                      display: ["system": L("как в системе","match system"), "en": "english",
-                                "ru": "русский", "fr": "français", "es": "español",
-                                "pt": "português", "zh": "中文"][Cfg.lang]
-                               ?? L("как в системе","match system")))
-        m.addItem(sub(L("Тема","Theme"), "theme",
-                      [(L("Как в системе","Match system"), "system"), (L("Дневная","Light"), "light"), (L("Ночная","Dark"), "dark")],
-                      Cfg.theme,
-                      display: ["system": L("как в системе","match system"),
-                                "light": L("дневная","light"),
-                                "dark": L("ночная","dark")][Cfg.theme]
-                               ?? L("как в системе","match system")))
-        m.addItem(sub(L("Размер шрифта","Font size"), "fontSize",
-                      [("11", 11.0), ("12", 12.0), ("13", 13.0), ("15", 15.0),
-                       ("17", 17.0), ("20", 20.0), ("24", 24.0)],
-                      Cfg.fontSize, manual: L("Размер в пунктах, например 16","Point size, e.g. 16"),
-                      display: String(format: "%g pt", Cfg.fontSize)))
-        m.addItem(sub(L("Прозрачность","Opacity"), "opacity",
-                      [(L("Плотная","Solid"), 1.0), (L("Обычная","Normal"), 0.88), (L("Лёгкая","Light"), 0.7), (L("Призрак","Ghost"), 0.5)],
-                      Cfg.opacity, manual: L("От 0.2 до 1.0","From 0.2 to 1.0"),
-                      display: String(format: "%g", Cfg.opacity)))
-        m.addItem(sub(L("Интервал обновления","Refresh interval"), "interval",
-                      [(L("1 мин","1 min"), 60.0), (L("5 мин","5 min"), 300.0), (L("15 мин","15 min"), 900.0)], Cfg.interval,
-                      manual: L("В секундах, не меньше 60","Seconds, at least 60"),
-                      display: "\(Int(Cfg.interval / 60)) \(L("мин","min"))"))
-        m.addItem(sub(L("Порог жёлтого","Yellow threshold"), "warnAt",
-                      [(L("1.00 — по потолку","1.00 — at ceiling"), 1.0), ("0.95", 0.95), ("0.90", 0.90)], Cfg.warnAt,
-                      manual: L("Доля от нормы, например 0.95","Share of norm, e.g. 0.95"),
-                      display: String(format: "%.2f", Cfg.warnAt)))
-        m.addItem(sub(L("Порог красного","Red threshold"), "dangerAt",
-                      [("0.90", 0.90), ("0.85", 0.85), ("0.80", 0.80)], Cfg.dangerAt,
-                      manual: L("Доля от нормы, например 0.82","Share of norm, e.g. 0.82"),
-                      display: String(format: "%.2f", Cfg.dangerAt)))
+        // One entry instead of two: hiding the item is just another choice here.
+        let barNames = ["off": L("скрыта","hidden"), "auto": L("самый напряжённый","tightest"),
+                        "session": L("сессия 5ч","5h session"), "all": L("все модели","all models"),
+                        "scoped": L("по модели","per model")]
+        let barNow = Cfg.statusBar ? Cfg.statusRow : "off"
+        m.addItem(sub(L("В строке меню","Menu bar"), "menuBar",
+                      [(L("Скрыть","Hide"), "off"),
+                       (L("Самый напряжённый","Tightest"), "auto"),
+                       (L("Сессия 5ч","5h session"), "session"),
+                       (L("Все модели","All models"), "all"),
+                       (L("По модели","Per model"), "scoped")], barNow,
+                      display: barNames[barNow] ?? ""))
         m.addItem(.separator())
 
-        let cornerItem = NSMenuItem(title: L("Угол по умолчанию","Default corner"), action: nil, keyEquivalent: "")
-        let subM = NSMenu()
+        m.addItem(group(L("Настройки","Settings"), [
+            sub(L("Язык","Language"), "lang",
+                // ordered by the English name of each language
+                [(L("Как в системе","Match system"), "system"),
+                 ("中文", "zh"), ("English", "en"), ("Français", "fr"),
+                 ("Português", "pt"), ("Русский", "ru"), ("Español", "es")], Cfg.lang,
+                display: ["system": L("как в системе","match system"), "en": "english",
+                          "ru": "русский", "fr": "français", "es": "español",
+                          "pt": "português", "zh": "中文"][Cfg.lang] ?? ""),
+            sub(L("Тема","Theme"), "theme",
+                [(L("Как в системе","Match system"), "system"), (L("Дневная","Light"), "light"),
+                 (L("Ночная","Dark"), "dark")], Cfg.theme,
+                display: ["system": L("как в системе","match system"),
+                          "light": L("дневная","light"),
+                          "dark": L("ночная","dark")][Cfg.theme] ?? ""),
+            sub(L("Размер шрифта","Font size"), "fontSize",
+                [("11", 11.0), ("12", 12.0), ("13", 13.0), ("15", 15.0),
+                 ("17", 17.0), ("20", 20.0), ("24", 24.0)], Cfg.fontSize,
+                manual: L("Размер в пунктах, например 16","Point size, e.g. 16"),
+                display: String(format: "%g pt", Cfg.fontSize)),
+            sub(L("Прозрачность","Opacity"), "opacity",
+                [(L("Плотная","Solid"), 1.0), (L("Обычная","Normal"), 0.88),
+                 (L("Лёгкая","Light"), 0.7), (L("Призрак","Ghost"), 0.5)], Cfg.opacity,
+                manual: L("От 0.2 до 1.0","From 0.2 to 1.0"),
+                display: String(format: "%g", Cfg.opacity)),
+            sub(L("Интервал обновления","Refresh interval"), "interval",
+                [(L("1 мин","1 min"), 60.0), (L("5 мин","5 min"), 300.0),
+                 (L("15 мин","15 min"), 900.0)], Cfg.interval,
+                manual: L("В секундах, не меньше 60","Seconds, at least 60"),
+                display: "\(Int(Cfg.interval / 60)) \(L("мин","min"))"),
+            sub(L("Порог жёлтого","Yellow threshold"), "warnAt",
+                [(L("1.00 — по потолку","1.00 — at ceiling"), 1.0), ("0.95", 0.95),
+                 ("0.90", 0.90)], Cfg.warnAt,
+                manual: L("Доля от нормы, например 0.95","Share of norm, e.g. 0.95"),
+                display: String(format: "%.2f", Cfg.warnAt)),
+            sub(L("Порог красного","Red threshold"), "dangerAt",
+                [("0.90", 0.90), ("0.85", 0.85), ("0.80", 0.80)], Cfg.dangerAt,
+                manual: L("Доля от нормы, например 0.82","Share of norm, e.g. 0.82"),
+                display: String(format: "%.2f", Cfg.dangerAt)),
+        ]))
+
+        var corners: [NSMenuItem] = []
         let cur = Cfg.d.string(forKey: "corner") ?? "topLeft"
-        for (title, key) in [(L("Слева вверху","Top left"), "topLeft"), (L("Справа вверху","Top right"), "topRight"),
-                             (L("Слева внизу","Bottom left"), "bottomLeft"), (L("Справа внизу","Bottom right"), "bottomRight")] {
+        for (title, key) in [(L("Слева вверху","Top left"), "topLeft"),
+                             (L("Справа вверху","Top right"), "topRight"),
+                             (L("Слева внизу","Bottom left"), "bottomLeft"),
+                             (L("Справа внизу","Bottom right"), "bottomRight")] {
             let it = NSMenuItem(title: title, action: #selector(setCorner(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = key
             it.state = key == cur ? .on : .off
-            subM.addItem(it)
+            corners.append(it)
         }
-        cornerItem.submenu = subM
-        m.addItem(cornerItem)
-        let ret = NSMenuItem(title: L("Вернуть на место","Reset position"), action: #selector(resetPosition),
-                             keyEquivalent: "")
-        ret.target = self
-        m.addItem(ret)
+        corners.append(.separator())
+        corners.append(item(L("Вернуть на место","Reset position"), #selector(resetPosition)))
+        m.addItem(group(L("Положение","Position"), corners))
         m.addItem(.separator())
 
-        for (title, sel) in [(L("Убрать в док","Send to Dock"), #selector(toDock)),
-                             (L("Скрыть до возврата в Claude","Hide until back in Claude"), #selector(hideUntilReturn)),
-                             (Cfg.collapsed ? L("Развернуть","Expand") : L("Свернуть до одной строки","Collapse to one row"),
-                              #selector(toggleCollapse)),
-                             (L("Помощь","Help"), #selector(showHelp)),
-                             (L("Выйти","Quit"), #selector(quitForever))] {
-            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            it.target = self
-            m.addItem(it)
-        }
+        m.addItem(item(L("Помощь","Help"), #selector(showHelp)))
+        m.addItem(item(L("Выйти","Quit"), #selector(quitForever)))
         return m
     }
+
 
     // --- Settings ---
     var settingsWin: NSWindow?
