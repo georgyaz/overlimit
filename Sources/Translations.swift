@@ -127,4 +127,10 @@ let TR: [String: [String: String]] = [
     "Share of norm, e.g. 0.82": ["fr": "Part de la norme, ex. 0,82",
                                  "es": "Fracción de la norma, p. ej. 0,82",
                                  "pt": "Fração da norma, ex. 0,82", "zh": "占基准的比例，例如 0.82"],
+    "Menu bar shows": ["fr": "Dans la barre de menus", "es": "En la barra de menús",
+                       "pt": "Na barra de menus", "zh": "菜单栏显示"],
+    "Tightest": ["fr": "Le plus serré", "es": "El más ajustado",
+                 "pt": "O mais apertado", "zh": "最紧张的"],
+    "tightest": ["fr": "le plus serré", "es": "el más ajustado",
+                 "pt": "o mais apertado", "zh": "最紧张的"],
 ]

@@ -192,6 +192,7 @@ enum Cfg {
         d.object(forKey: key) == nil ? true : d.bool(forKey: key)
     }
     static var statusBar: Bool { d.object(forKey: "statusBar") == nil ? true : d.bool(forKey: "statusBar") }
+    static var statusRow: String { d.string(forKey: "statusRow") ?? "auto" }
     static var lang: String { d.string(forKey: "lang") ?? "system" }
     static var collapsed: Bool { d.bool(forKey: "collapsed") }
     static var collapsedRow: String { d.string(forKey: "collapsedRow") ?? "session" }
@@ -223,6 +224,7 @@ func L(_ ru: String, _ en: String) -> String {
 }
 
 struct Row {
+    let id: String          // session | all | scoped
     let tag: String
     let percent: Double
     let ceiling: Double
@@ -747,7 +749,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func updateStatusItem(_ rows: [Row]) {
         guard let btn = statusItem?.button else { return }
         statusItem?.menu = buildMenu()
-        guard let worst = rows.max(by: { (100 - $0.percent) > (100 - $1.percent) }) else {
+        // Which row to show: a specific one, or whichever is tightest.
+        let pick: Row?
+        switch Cfg.statusRow {
+        case "session": pick = rows.first { $0.id == "session" }
+        case "all":     pick = rows.first { $0.id == "all" }
+        case "scoped":  pick = rows.first { $0.id == "scoped" }
+        default:        pick = rows.max { (100 - $0.percent) > (100 - $1.percent) }
+        }
+        guard let worst = pick ?? rows.first else {
             btn.title = "—"; return
         }
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
@@ -789,6 +799,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                       [(L("Показывать","Show"), true), (L("Скрыть","Hide"), false)],
                       Cfg.statusBar,
                       display: Cfg.statusBar ? L("показывать","shown") : L("скрыта","hidden")))
+        if Cfg.statusBar {
+            m.addItem(sub(L("В строке меню показывать","Menu bar shows"), "statusRow",
+                          [(L("Самый напряжённый","Tightest"), "auto"),
+                           (L("Сессия 5ч","5h session"), "session"),
+                           (L("Все модели","All models"), "all"),
+                           (L("По модели","Per model"), "scoped")], Cfg.statusRow,
+                          display: ["auto": L("самый напряжённый","tightest"),
+                                    "session": L("сессия 5ч","5h session"),
+                                    "all": L("все модели","all models"),
+                                    "scoped": L("по модели","per model")][Cfg.statusRow]
+                                   ?? L("самый напряжённый","tightest")))
+        }
         m.addItem(sub(L("Язык","Language"), "lang",
                       // ordered by the English name of each language
                       [(L("Как в системе","Match system"), "system"),
@@ -939,7 +961,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if allow("session"), let s = cur.first(where: { $0.kind == "session" }) {
             out.append(line(sessionText(s) + "\n", sessionColor(s.percent)))
             let hl = min(max((s.resets?.timeIntervalSinceNow ?? 18000) / 3600.0, 0), 5)
-            rows.append(Row(tag: L("5ч","5h"), percent: s.percent, ceiling: max(100 - 20 * hl, 0),
+            rows.append(Row(id: "session", tag: L("5ч","5h"), percent: s.percent, ceiling: max(100 - 20 * hl, 0),
                             color: sessionColor(s.percent), time: fmtLeft(s.resets)))
         }
 
@@ -954,7 +976,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let b = budget(item.1) else { continue }
             let tail = i == weeklies.count - 1 ? "" : "\n"
             out.append(line(weeklyText(item.0, item.1, b) + tail, weeklyColor(b)))
-            rows.append(Row(tag: item.0, percent: item.1.percent, ceiling: b.ceiling,
+            rows.append(Row(id: item.0 == L("Все","All") ? "all" : "scoped", tag: item.0, percent: item.1.percent, ceiling: b.ceiling,
                             color: weeklyColor(b), time: fmtLeft(item.1.resets)))
         }
         panel.rows = rows
