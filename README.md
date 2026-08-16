@@ -3,7 +3,13 @@
 A floating usage panel for Claude subscription limits on macOS.
 
 It sits above the Claude Desktop window and answers one question the built-in
-usage screen does not: **at this pace, will my weekly limit last until reset?**
+usage display does not: **at this pace, will my weekly limit last until reset?**
+
+Claude Desktop 1.30096 added a menu bar item of its own showing the same three
+percentages. If all you want is the current numbers, use that — it ships with
+the app and needs no setup. Overlimit is about the pace behind those numbers:
+where the even-pace line runs right now, whether you are above or below it, and
+what previous weeks closed at.
 
 > Unofficial. Not affiliated with, endorsed by, or sponsored by Anthropic.
 > Claude is a trademark of Anthropic, PBC.

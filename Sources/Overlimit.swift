@@ -192,6 +192,7 @@ enum Cfg {
         d.object(forKey: key) == nil ? true : d.bool(forKey: key)
     }
     static var statusBar: Bool { d.object(forKey: "statusBar") == nil ? true : d.bool(forKey: "statusBar") }
+    static var statusLong: Bool { d.bool(forKey: "statusLong") }
     static var statusRow: String { d.string(forKey: "statusRow") ?? "auto" }
     static var lang: String { d.string(forKey: "lang") ?? "system" }
     static var collapsed: Bool { d.bool(forKey: "collapsed") }
@@ -375,7 +376,7 @@ final class PanelView: NSView {
     override func rightMouseDown(with e: NSEvent) { onMenu?(e) }
 }
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     var window: NSWindow!
     var panel: PanelView!
     var refreshTimer: Timer?
@@ -399,7 +400,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let v = PanelView(frame: rect)
         label.frame = NSRect(x: 14, y: 10, width: 322, height: 70)
-        label.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .medium)
+        label.font = NSFont.monospacedSystemFont(ofSize: Cfg.fontSize, weight: .medium)
         label.maximumNumberOfLines = 4
         v.addSubview(label)
 
@@ -447,6 +448,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
         applyVisibility(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
 
+        setupStatusItem()
         refresh()
         startTimer()
         // Visibility watchdog: activation notifications do not always arrive (clicking
@@ -742,10 +744,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // --- macOS menu bar ---
     // Shows the tightest limit and opens the same settings menu.
     // Always visible, even while the panel is hidden or docked.
+
     func setupStatusItem() {
         if Cfg.statusBar {
             if statusItem == nil {
                 statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+                // Built once and refilled on demand. Reassigning .menu on every
+                // refresh could land while the menu was open, which knocked the
+                // item out of the menu bar.
+                let m = NSMenu()
+                m.delegate = self
+                statusItem?.menu = m
             }
         } else if let si = statusItem {
             NSStatusBar.system.removeStatusItem(si)
@@ -753,9 +762,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // Refill the status item menu right before it opens.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        menu.removeAllItems()
+        for it in buildMenu().items {
+            it.menu?.removeItem(it)
+            menu.addItem(it)
+        }
+    }
+
     func updateStatusItem(_ rows: [Row]) {
         guard let btn = statusItem?.button else { return }
-        statusItem?.menu = buildMenu()
         // Which row to show: a specific one, or whichever is tightest.
         let pick: Row?
         switch Cfg.statusRow {
@@ -767,10 +785,19 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let worst = pick ?? rows.first else {
             btn.title = "—"; return
         }
+        // Compact by default: a coloured dot plus the number. On a notched
+        // MacBook a long title is the first thing macOS drops when the menu bar
+        // runs out of room, and the colour already says which state we are in.
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        btn.attributedTitle = NSAttributedString(
-            string: "\(worst.tag) \(String(format: "%.0f", worst.percent))%",
-            attributes: [.font: font, .foregroundColor: worst.color])
+        let text = Cfg.statusLong ? "\(worst.tag) \(String(format: "%.0f", worst.percent))%"
+                                  : "\(String(format: "%.0f", worst.percent))%"
+        let out = NSMutableAttributedString(
+            string: text, attributes: [.font: font, .foregroundColor: worst.color])
+        if !Cfg.statusLong {
+            out.insert(NSAttributedString(string: "● ", attributes: [
+                .font: NSFont.systemFont(ofSize: 8), .foregroundColor: worst.color]), at: 0)
+        }
+        btn.attributedTitle = out
     }
 
     @objc func showMenu(_ e: NSEvent) {
@@ -837,6 +864,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                        (L("Все модели","All models"), "all"),
                        (L("По модели","Per model"), "scoped")], barNow,
                       display: barNames[barNow] ?? ""))
+        if Cfg.statusBar {
+            m.addItem(sub(L("Надпись в строке меню","Menu bar label"), "statusLong",
+                          [(L("Коротко: ● 35%","Short: ● 35%"), false),
+                           (L("С названием: Fable 35%","With name: Fable 35%"), true)],
+                          Cfg.statusLong,
+                          display: Cfg.statusLong ? L("с названием","with name")
+                                                  : L("коротко","short")))
+        }
         m.addItem(.separator())
 
         m.addItem(group(L("Настройки","Settings"), [
@@ -957,11 +992,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return p
     }()
 
-    func line(_ text: String, _ c: NSColor, size: CGFloat = 15) -> NSAttributedString {
-        NSAttributedString(string: text, attributes: [
+    func line(_ text: String, _ c: NSColor, size: CGFloat? = nil) -> NSAttributedString {
+        let pt = size ?? Cfg.fontSize
+        return NSAttributedString(string: text, attributes: [
             .foregroundColor: c,
             .paragraphStyle: App.noWrap,
-            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .medium)])
+            .font: NSFont.monospacedSystemFont(ofSize: pt, weight: .medium)])
     }
 
     func refresh() {
@@ -1008,7 +1044,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // One exception: if collection stalls, we must not stay silent.
         let age = Date().timeIntervalSince(newest)
         if age > 900 {
-            out.append(line("\n⚠︎ \(L("данные устарели","data is stale")): \(fmtAgo(age))", .systemOrange, size: 13))
+            out.append(line("\n⚠︎ \(L("данные устарели","data is stale")): \(fmtAgo(age))", .systemOrange, size: max(Cfg.fontSize - 2, 9)))
         }
         label.attributedStringValue = out
         fitToContent()

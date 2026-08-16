@@ -136,4 +136,12 @@ let TR: [String: [String: String]] = [
     "Put away": ["fr": "Ranger", "es": "Guardar", "pt": "Guardar", "zh": "收起"],
     "Settings": ["fr": "Réglages", "es": "Ajustes", "pt": "Ajustes", "zh": "设置"],
     "Position": ["fr": "Position", "es": "Posición", "pt": "Posição", "zh": "位置"],
+    "Menu bar label": ["fr": "Texte dans la barre", "es": "Texto en la barra",
+                       "pt": "Texto na barra", "zh": "菜单栏文字"],
+    "Short: ● 35%": ["fr": "Court : ● 35%", "es": "Corto: ● 35%",
+                     "pt": "Curto: ● 35%", "zh": "简短：● 35%"],
+    "With name: Fable 35%": ["fr": "Avec le nom : Fable 35%", "es": "Con nombre: Fable 35%",
+                             "pt": "Com nome: Fable 35%", "zh": "含名称：Fable 35%"],
+    "short": ["fr": "court", "es": "corto", "pt": "curto", "zh": "简短"],
+    "with name": ["fr": "avec le nom", "es": "con nombre", "pt": "com nome", "zh": "含名称"],
 ]
