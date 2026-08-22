@@ -454,7 +454,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         // Visibility watchdog: activation notifications do not always arrive (clicking
         // the desktop, for one), and the window could stay hidden until the next
         // refresh five minutes later.
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in self.syncVisibility() }
+        // Safety net only: instant show/hide comes from the activation
+        // notification above. The timer covers missed notifications (a click
+        // on the desktop sends none) and rescues an off-screen window.
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in self.syncVisibility() }
     }
 
     func startTimer() {
@@ -515,17 +518,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         applyVisibility(app?.bundleIdentifier)
     }
 
+    // Single source of truth for visibility: the activation notification and
+    // the timer both go through syncVisibility, which also honours the docked
+    // and hidden states. Having two code paths meant the notification could
+    // show a docked panel and the timer would hide it again two seconds later.
     func applyVisibility(_ bundleID: String?) {
-        // Our own app counts as "ours": dragging the panel makes it frontmost, and
-        // without this check it would hide itself right under the cursor while being
-        // dragged.
-        let mine = Bundle.main.bundleIdentifier
-        if bundleID == claudeBundleID || (bundleID != nil && bundleID == mine) {
-            refresh()
-            window.orderFrontRegardless()
-        } else {
-            window.orderOut(nil)
-        }
+        syncVisibility()
     }
 
     // Green button: collapse the panel to a single row and back.
