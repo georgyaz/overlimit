@@ -485,7 +485,26 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         return front == claudeBundleID || (front != nil && front == Bundle.main.bundleIdentifier)
     }
 
+    // The panel is resident now, so docked/hidden would survive overnight:
+    // press red in the evening and the next morning Claude is open while the
+    // panel silently remembers yesterday's "go away". A Claude restart means
+    // a new session - start it clean.
+    var lastClaudePID: pid_t = -1
+
+    func resetOnClaudeRestart() {
+        let pid = NSWorkspace.shared.runningApplications
+            .first { $0.bundleIdentifier == claudeBundleID }?.processIdentifier ?? -1
+        guard pid != lastClaudePID else { return }
+        lastClaudePID = pid
+        guard pid != -1, docked || hidden else { return }
+        docked = false; hidden = false
+        dockPresses = 0
+        dockTimer?.invalidate()
+        NSApp.setActivationPolicy(.accessory)
+    }
+
     func syncVisibility() {
+        resetOnClaudeRestart()
         if shouldBeVisible && !window.isVisible {
             refresh()
             window.orderFrontRegardless()
