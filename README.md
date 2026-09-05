@@ -89,6 +89,12 @@ Three moving parts:
 2. **`token.py`** — refreshes that token when it expires (roughly hourly) and
    writes it back to the same keychain entry, so the CLI and this tool stay in
    sync. Backs off for 30 minutes on HTTP 429.
+
+   Since September 2026 the refresh token itself expires after ~30 days of not
+   using Claude Code (`refreshTokenExpiresAt` in the keychain entry). When that
+   happens nothing can be refreshed programmatically — run `claude auth login`
+   once and collection resumes on the next tick. The panel shows a
+   "data is stale" row while this is the case.
 3. **The app** — reads the CSV, never the network. It cannot cause rate limits.
 
 Closed windows are recorded in `~/.overlimit/history.csv` for week-over-week
