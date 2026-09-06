@@ -49,7 +49,12 @@ if [ "$CODE" != "200" ]; then
   exit 1
 fi
 
-[ -f "$CSV" ] || echo "ts_utc,kind,group,model,percent,severity,resets_at,is_active" > "$CSV"
+head -1 "$CSV" 2>/dev/null | grep -q "^ts_utc," || {
+  TMP=$(mktemp)
+  echo "ts_utc,kind,group,model,percent,severity,resets_at,is_active" > "$TMP"
+  [ -f "$CSV" ] && grep -v "^ts_utc," "$CSV" >> "$TMP"
+  mv "$TMP" "$CSV"
+}
 
 printf '%s' "$BODY" | python3 -c '
 import sys, json, datetime
@@ -76,7 +81,9 @@ if rows:
     newest = max(r["ts_utc"] for r in rows)
     keep = [r for r in rows if r["ts_utc"] == newest]
     with open(sys.argv[1], "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        # csv defaults to \r\n line endings; the panel splits on \n and the
+        # stray \r glued to the last field broke parsing ("no data").
+        w = csv.DictWriter(f, fieldnames=rows[0].keys(), lineterminator="\n")
         w.writeheader(); w.writerows(keep)
 PRUNE
   exit 0
