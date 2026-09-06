@@ -4,6 +4,11 @@
 set -uo pipefail
 
 DIR="$HOME/.overlimit"
+# Optional retention policy: KEEP_DAYS=0 keeps only the latest snapshot and
+# skips closed-window history - the panel needs nothing more. Unset means
+# accumulate everything (the default, and what the week-over-week history
+# in the README relies on).
+[ -f "$DIR/config" ] && . "$DIR/config"
 CSV="$DIR/usage-log.csv"
 ERR="$DIR/usage-log.err"
 mkdir -p "$DIR"
@@ -61,6 +66,21 @@ for l in d.get("limits") or []:
 for r in rows:
     print(",".join(str(x) for x in r))
 ' >> "$CSV"
+
+# --- retention ---
+if [ "${KEEP_DAYS:-}" = "0" ]; then
+  python3 - "$CSV" <<'PRUNE'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+if rows:
+    newest = max(r["ts_utc"] for r in rows)
+    keep = [r for r in rows if r["ts_utc"] == newest]
+    with open(sys.argv[1], "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader(); w.writerows(keep)
+PRUNE
+  exit 0
+fi
 
 # --- record the outcome of closed windows ---
 # A changed resets_at means the previous window has closed.

@@ -100,6 +100,11 @@ Three moving parts:
 Closed windows are recorded in `~/.overlimit/history.csv` for week-over-week
 comparison.
 
+If you want the panel without the archive, put `KEEP_DAYS=0` into
+`~/.overlimit/config`: each snapshot then replaces the previous one, nothing
+accumulates, and closed windows are not recorded. The pace metric only needs
+the latest snapshot, so the panel works the same.
+
 ## Please read this before installing
 
 **This tool uses an undocumented endpoint and a credential that Anthropic
