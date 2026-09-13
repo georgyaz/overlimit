@@ -487,6 +487,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
             if leftClaudeSinceHide && front == claudeBundleID {
                 hidden = false
                 leftClaudeSinceHide = false
+                hideTimer?.invalidate()
             } else {
                 return false
             }
@@ -668,14 +669,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         }
     }
 
+    // Same hard cap as docking. "Until you come back to Claude" needs you to
+    // leave Claude first - and switching to a Claude Design window does not
+    // count, since it is the same app: the panel could stay hidden all day.
+    var hideTimer: Timer?
+
     @objc func hideUntilReturn() {
         hidden = true; docked = false
         leftClaudeSinceHide = false
         window.orderOut(nil)
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in
+            self.restore()
+        }
     }
 
     func restore() {
         dockTimer?.invalidate()
+        hideTimer?.invalidate()
         docked = false; hidden = false
         NSApp.setActivationPolicy(.accessory)
         refresh()
