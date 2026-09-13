@@ -381,6 +381,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     var panel: PanelView!
     var refreshTimer: Timer?
     var statusItem: NSStatusItem?
+    var stale = false
+    let refreshBtn = NSButton(title: "", target: nil, action: nil)
     let label = NSTextField(labelWithString: "…")
     let close = NSButton(title: "×", target: nil, action: nil)
     let claudeBundleID = "com.anthropic.claudefordesktop"
@@ -420,6 +422,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         v.onZoom = { [weak self] in self?.toggleCollapse() }
         v.onMenu = { [weak self] e in self?.showMenu(e) }
         v.onHover = { [weak self] _ in self?.fitToContent() }
+        refreshBtn.bezelStyle = .rounded
+        refreshBtn.controlSize = .small
+        refreshBtn.font = NSFont.systemFont(ofSize: 11)
+        refreshBtn.target = self
+        refreshBtn.action = #selector(manualRefresh)
+        refreshBtn.isHidden = true
+        v.addSubview(refreshBtn)
         panel = v
 
         window.contentView = v
@@ -498,7 +507,6 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         lastClaudePID = pid
         guard pid != -1, docked || hidden else { return }
         docked = false; hidden = false
-        dockPresses = 0
         dockTimer?.invalidate()
         NSApp.setActivationPolicy(.accessory)
     }
@@ -561,6 +569,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         }
     }
 
+    // Manual refresh: run the snapshot script right now instead of waiting
+    // for the next launchd tick - the usual cure after the Mac wakes up.
+    @objc func manualRefresh() {
+        refreshBtn.isEnabled = false
+        refreshBtn.title = L("Обновляю…","Refreshing…")
+        DispatchQueue.global().async {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [NSString(string: "~/.overlimit/snapshot.sh").expandingTildeInPath]
+            try? proc.run()
+            proc.waitUntilExit()
+            DispatchQueue.main.async {
+                self.refreshBtn.isEnabled = true
+                self.refresh()
+            }
+        }
+    }
+
     @objc func quit() { NSApp.terminate(nil) }
 
     // Quit means quit: the watcher will not relaunch. The flag is cleared when
@@ -585,7 +611,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         Цвет недельных строк — по темпу: сколько можно тратить в день до сброса,
         в сравнении с нормой 14,29 п.п. Сессия красится по остатку.
 
-        Кнопки при наведении: красная — в док, жёлтая — скрыть до возврата
+        Кнопки при наведении: красная — в док на час, жёлтая — скрыть до возврата
         в Claude, зелёная — свернуть до одной строки. Рядом шестерёнка и помощь.
 
         Правый клик — настройки. Перетаскивание запоминается,
@@ -603,7 +629,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         Weekly rows are coloured by pace: how much you may spend per day
         until reset, against the 14.29 pp norm. The session row uses remaining.
 
-        Hover buttons: red sends to Dock, yellow hides until you return
+        Hover buttons: red docks it for an hour, yellow hides until you return
         to Claude, green collapses to one row. Then gear and help.
 
         Right-click opens settings. Dragging is remembered;
@@ -626,9 +652,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     var hidden = false
     var leftClaudeSinceHide = false
 
-    // First press: dock it and bring it back after 15 minutes, once.
-    // Second press in a row: it stays docked until the icon is clicked.
-    var dockPresses = 0
+    // Docking always expires after an hour. There used to be a "second press
+    // keeps it docked until you click the icon" rule, and it was the single
+    // biggest source of "the panel is gone": press it in the evening, spend
+    // the next morning wondering. Anything permanent is what Quit is for.
     var dockTimer: Timer?
 
     @objc func toDock() {
@@ -636,13 +663,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         window.orderOut(nil)
         NSApp.setActivationPolicy(.regular)
         dockTimer?.invalidate()
-        if dockPresses == 0 {
-            dockTimer = Timer.scheduledTimer(withTimeInterval: 900, repeats: false) { _ in
-                self.restore()
-                self.dockPresses = 1        // it came back once; next time it stays
-            }
+        dockTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in
+            self.restore()
         }
-        dockPresses += 1
     }
 
     @objc func hideUntilReturn() {
@@ -659,9 +682,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         window.orderFrontRegardless()
     }
 
-    // Clicking the Dock icon is a deliberate return, so reset the counter.
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool {
-        dockPresses = 0
         restore()
         return true
     }
@@ -1018,6 +1039,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     }
 
     func refresh() {
+        stale = false          // recomputed below; the button follows it
         let all = loadSamples()
         let out = NSMutableAttributedString()
         let grayFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -1061,7 +1083,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         // One exception: if collection stalls, we must not stay silent.
         let age = Date().timeIntervalSince(newest)
         if age > 900 {
-            out.append(line("\n⚠︎ \(L("данные устарели","data is stale")): \(fmtAgo(age))", .systemOrange, size: max(Cfg.fontSize - 2, 9)))
+            stale = true
+            out.append(line("\n⚠︎ \(L("нет свежих данных","no fresh data")): \(fmtAgo(age))", .systemOrange, size: max(Cfg.fontSize - 2, 9)))
         }
         label.attributedStringValue = out
         fitToContent()
@@ -1072,6 +1095,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     // ignores newlines - the width comes out too small and the text wraps.
     // Measure with boundingRect and .usesLineFragmentOrigin instead.
     func fitToContent() {
+        // Set before measuring: the button changes the window height.
+        refreshBtn.isHidden = !stale
         let padL: CGFloat = 8, padY: CGFloat = 4
         let padR: CGFloat = 4
         let strip = panel?.strip ?? 0
@@ -1092,6 +1117,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
             w = textW + padL + padR
             h = textH + padY * 2 + strip
             label.frame = NSRect(x: padL, y: padY + strip, width: textW, height: textH)
+            if !refreshBtn.isHidden {
+                refreshBtn.title = refreshBtn.isEnabled ? L("Обновить сейчас","Refresh now")
+                                                        : L("Обновляю…","Refreshing…")
+                refreshBtn.sizeToFit()
+                refreshBtn.frame.origin = NSPoint(x: padL, y: label.frame.maxY + 2)
+                h += refreshBtn.frame.height + 6
+                w = max(w, refreshBtn.frame.width + padL + padR)
+            }
         }
         panel?.needsDisplay = true
 

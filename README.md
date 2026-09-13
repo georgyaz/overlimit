@@ -65,8 +65,9 @@ To remove: `./uninstall.sh` (add `--purge` to delete collected data too).
 The panel appears when Claude Desktop is in the foreground and hides when you
 switch away. Drag it anywhere — the position is remembered.
 
-Hover to reveal the controls: **red** sends it to the Dock, **yellow** hides it
-until you come back to Claude, **green** collapses it to a single row. Then a
+Hover to reveal the controls: **red** docks it for an hour, **yellow** hides it
+until you come back to Claude, **green** collapses it to a single row. Nothing
+puts it away permanently — that is what Quit is for. Then a
 gear and a help button.
 
 **Right-click** opens everything else: view mode (numbers or bars), which rows

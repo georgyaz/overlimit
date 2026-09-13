@@ -144,4 +144,10 @@ let TR: [String: [String: String]] = [
                              "pt": "Com nome: Fable 35%", "zh": "含名称：Fable 35%"],
     "short": ["fr": "court", "es": "corto", "pt": "curto", "zh": "简短"],
     "with name": ["fr": "avec le nom", "es": "con nombre", "pt": "com nome", "zh": "含名称"],
+    "no fresh data": ["fr": "pas de données fraîches", "es": "sin datos recientes",
+                      "pt": "sem dados recentes", "zh": "无最新数据"],
+    "Refresh now": ["fr": "Actualiser maintenant", "es": "Actualizar ahora",
+                    "pt": "Atualizar agora", "zh": "立即刷新"],
+    "Refreshing…": ["fr": "Actualisation…", "es": "Actualizando…",
+                    "pt": "Atualizando…", "zh": "正在刷新…"],
 ]
