@@ -512,15 +512,40 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         NSApp.setActivationPolicy(.accessory)
     }
 
+    // Visibility journal: one line per state change, so "the panel is gone"
+    // can be diagnosed from evidence instead of guesswork. Small and rotating.
+    var lastJournal = ""
+    func journal(_ front: String?, _ shouldShow: Bool) {
+        let f = window.frame
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
+        let state = "front=\(front ?? "nil") show=\(shouldShow) visible=\(window.isVisible) " +
+                    "docked=\(docked) hidden=\(hidden) onScreen=\(onScreen) " +
+                    "frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) " +
+                    "policy=\(NSApp.activationPolicy().rawValue)"
+        guard state != lastJournal else { return }
+        lastJournal = state
+        let path = NSString(string: "~/.overlimit/panel.log").expandingTildeInPath
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let line = "\(df.string(from: Date())) \(state)\n"
+        if let h = FileHandle(forWritingAtPath: path) {
+            if (try? h.seekToEnd()) ?? 0 > 200_000 { try? "".write(toFile: path, atomically: true, encoding: .utf8) }
+            h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
     func syncVisibility() {
         resetOnClaudeRestart()
-        if shouldBeVisible && !window.isVisible {
+        let show = shouldBeVisible
+        if show && !window.isVisible {
             refresh()
             window.orderFrontRegardless()
-        } else if !shouldBeVisible && window.isVisible {
+        } else if !show && window.isVisible {
             window.orderOut(nil)
         }
         if window.isVisible { rescueOffscreen() }
+        journal(NSWorkspace.shared.frontmostApplication?.bundleIdentifier, show)
     }
 
     // Remember where the user dragged the panel.
