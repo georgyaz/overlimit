@@ -521,7 +521,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         let state = "front=\(front ?? "nil") show=\(shouldShow) visible=\(window.isVisible) " +
                     "docked=\(docked) hidden=\(hidden) onScreen=\(onScreen) " +
                     "frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) " +
-                    "policy=\(NSApp.activationPolicy().rawValue)"
+                    "policy=\(NSApp.activationPolicy().rawValue) " +
+                    "activeSpace=\(window.isOnActiveSpace) " +
+                    "occluded=\(!window.occlusionState.contains(.visible)) " +
+                    "screen=\(window.screen?.localizedName ?? "none")"
         guard state != lastJournal else { return }
         lastJournal = state
         let path = NSString(string: "~/.overlimit/panel.log").expandingTildeInPath
@@ -541,7 +544,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         if show && !window.isVisible {
             refresh()
             window.orderFrontRegardless()
-        } else if !show && window.isVisible {
+        } else if show {
+            // Already "visible" but possibly buried under another floating
+            // window or left on a different Space. Re-ordering front is free.
+            window.orderFrontRegardless()
+        } else if window.isVisible {
             window.orderOut(nil)
         }
         if window.isVisible { rescueOffscreen() }
