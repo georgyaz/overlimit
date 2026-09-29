@@ -391,12 +391,21 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         NSApp.setActivationPolicy(.accessory)
         try? FileManager.default.removeItem(atPath: App.noAutoFlag)
         let rect = NSRect(x: 0, y: 0, width: 372, height: 86)
-        window = NSWindow(contentRect: rect, styleMask: [.borderless],
-                          backing: .buffered, defer: false)
+        // NSPanel + nonactivatingPanel is the recipe that reliably overlays
+        // another app's full-screen Space. The journal showed a plain NSWindow
+        // stayed off Claude's Space (activeSpace=false) whenever Claude ran
+        // full screen, despite canJoinAllSpaces + fullScreenAuxiliary.
+        let overlay = NSPanel(contentRect: rect,
+                              styleMask: [.borderless, .nonactivatingPanel],
+                              backing: .buffered, defer: false)
+        overlay.isFloatingPanel = true
+        overlay.becomesKeyOnlyIfNeeded = true
+        overlay.hidesOnDeactivate = false
+        window = overlay
         window.isOpaque = false
         window.backgroundColor = .clear
         window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hasShadow = true
         window.isMovableByWindowBackground = true
 
@@ -548,7 +557,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
             // Already "visible" but possibly buried under another floating
             // window or left on a different Space. Re-ordering front is free.
             window.orderFrontRegardless()
-        } else if window.isVisible {
+        }
+        if show && !window.isOnActiveSpace {
+            // Stranded on another Space: re-assert the behaviour so the window
+            // server re-evaluates membership, then order front again.
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.orderFrontRegardless()
+        }
+        if !show && window.isVisible {
             window.orderOut(nil)
         }
         if window.isVisible { rescueOffscreen() }
