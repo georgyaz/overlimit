@@ -150,4 +150,10 @@ let TR: [String: [String: String]] = [
                     "pt": "Atualizar agora", "zh": "立即刷新"],
     "Refreshing…": ["fr": "Actualisation…", "es": "Actualizando…",
                     "pt": "Atualizando…", "zh": "正在刷新…"],
+    "Claude Code sign-in required": ["fr": "Connexion à Claude Code requise", "es": "Se requiere iniciar sesión en Claude Code",
+                                     "pt": "É preciso entrar no Claude Code", "zh": "需要登录 Claude Code"],
+    "sign-in expires in": ["fr": "la connexion expire dans", "es": "la sesión expira en",
+                           "pt": "o login expira em", "zh": "登录将在以下时间后过期："],
+    "Sign in to Claude Code": ["fr": "Se connecter à Claude Code", "es": "Iniciar sesión en Claude Code",
+                               "pt": "Entrar no Claude Code", "zh": "登录 Claude Code"],
 ]

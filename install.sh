@@ -48,8 +48,8 @@ PLIST
 codesign --force -s - "$APP" >/dev/null 2>&1 || true
 
 echo "==> installing scripts"
-cp "$REPO/scripts/snapshot.sh" "$REPO/scripts/watch.sh" "$REPO/scripts/token.py" "$DIR/"
-chmod +x "$DIR/snapshot.sh" "$DIR/watch.sh"
+cp "$REPO/scripts/snapshot.sh" "$REPO/scripts/watch.sh" "$REPO/scripts/token.py" "$REPO/scripts/login.command" "$DIR/"
+chmod +x "$DIR/snapshot.sh" "$DIR/watch.sh" "$DIR/login.command"
 
 echo "==> installing launchd agents"
 for label in app.overlimit.snapshot app.overlimit.watch; do

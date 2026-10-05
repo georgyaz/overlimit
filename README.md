@@ -91,11 +91,13 @@ Three moving parts:
    writes it back to the same keychain entry, so the CLI and this tool stay in
    sync. Backs off for 30 minutes on HTTP 429.
 
-   Since September 2026 the refresh token itself expires after ~30 days of not
-   using Claude Code (`refreshTokenExpiresAt` in the keychain entry). When that
-   happens nothing can be refreshed programmatically — run `claude auth login`
-   once and collection resumes on the next tick. The panel shows a
-   "data is stale" row while this is the case.
+   Since September 2026 the refresh token has a hard 30-day life from the
+   moment you sign in (`refreshTokenExpiresAt` in the keychain entry). Using
+   Claude Code does not extend it; only signing in again does. Three days
+   before it runs out the panel shows a yellow "sign-in expires in N d" row
+   with a **Sign in to Claude Code** button; once it has expired, the row
+   turns orange. The button opens Terminal with `claude auth login`, the
+   browser does the rest, and the first snapshot runs when you are back.
 3. **The app** — reads the CSV, never the network. It cannot cause rate limits.
 
 Closed windows are recorded in `~/.overlimit/history.csv` for week-over-week

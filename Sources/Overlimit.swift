@@ -382,6 +382,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     var refreshTimer: Timer?
     var statusItem: NSStatusItem?
     var stale = false
+    var needsLogin = false
+    let loginBtn = NSButton(title: "", target: nil, action: nil)
     let refreshBtn = NSButton(title: "", target: nil, action: nil)
     let label = NSTextField(labelWithString: "…")
     let close = NSButton(title: "×", target: nil, action: nil)
@@ -438,6 +440,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         refreshBtn.action = #selector(manualRefresh)
         refreshBtn.isHidden = true
         v.addSubview(refreshBtn)
+        loginBtn.bezelStyle = .rounded
+        loginBtn.controlSize = .small
+        loginBtn.font = NSFont.systemFont(ofSize: 11)
+        loginBtn.target = self
+        loginBtn.action = #selector(signIn)
+        loginBtn.isHidden = true
+        v.addSubview(loginBtn)
         panel = v
 
         window.contentView = v
@@ -633,6 +642,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                 self.refreshBtn.isEnabled = true
                 self.refresh()
             }
+        }
+    }
+
+    // Sign-in needs a real TTY and a browser, so hand it to Terminal.app via a
+    // .command file. Then poll for a while: the script ends with a snapshot.
+    @objc func signIn() {
+        let path = NSString(string: "~/.overlimit/login.command").expandingTildeInPath
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        for delay in [20.0, 45.0, 90.0, 180.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.refresh() }
         }
     }
 
@@ -1098,7 +1117,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     }
 
     func refresh() {
-        stale = false          // recomputed below; the button follows it
+        stale = false
+        needsLogin = false          // recomputed below; the button follows it
         let all = loadSamples()
         let out = NSMutableAttributedString()
         let grayFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -1141,9 +1161,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         // There is no fourth row: the row colours are the signal.
         // One exception: if collection stalls, we must not stay silent.
         let age = Date().timeIntervalSince(newest)
-        if age > 900 {
+        let status = (try? String(contentsOfFile:
+            NSString(string: "~/.overlimit/status").expandingTildeInPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "ok"
+        let small = max(Cfg.fontSize - 2, 9)
+        if status == "auth_required" {
+            // Sign-in expired: the collector cannot authenticate at all.
+            needsLogin = true
+            out.append(line("\n⚠︎ \(L("нужен вход в Claude Code","Claude Code sign-in required"))",
+                            .systemOrange, size: small))
+        } else if status.hasPrefix("auth_soon:") {
+            // Refresh token has a hard 30-day life; warn before it bites.
+            needsLogin = true
+            let days = status.dropFirst("auth_soon:".count)
+            out.append(line("\n⚠︎ \(L("вход истекает через","sign-in expires in")) \(days) \(L("д","d"))",
+                            .systemYellow, size: small))
+        } else if age > 900 {
             stale = true
-            out.append(line("\n⚠︎ \(L("нет свежих данных","no fresh data")): \(fmtAgo(age))", .systemOrange, size: max(Cfg.fontSize - 2, 9)))
+            out.append(line("\n⚠︎ \(L("нет свежих данных","no fresh data")): \(fmtAgo(age))", .systemOrange, size: small))
         }
         label.attributedStringValue = out
         fitToContent()
@@ -1154,8 +1189,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     // ignores newlines - the width comes out too small and the text wraps.
     // Measure with boundingRect and .usesLineFragmentOrigin instead.
     func fitToContent() {
-        // Set before measuring: the button changes the window height.
+        // Set before measuring: the buttons change the window height.
         refreshBtn.isHidden = !stale
+        loginBtn.isHidden = !needsLogin
         let padL: CGFloat = 8, padY: CGFloat = 4
         let padR: CGFloat = 4
         let strip = panel?.strip ?? 0
@@ -1183,6 +1219,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                 refreshBtn.frame.origin = NSPoint(x: padL, y: label.frame.maxY + 2)
                 h += refreshBtn.frame.height + 6
                 w = max(w, refreshBtn.frame.width + padL + padR)
+            }
+            if !loginBtn.isHidden {
+                loginBtn.title = L("Войти в Claude Code","Sign in to Claude Code")
+                loginBtn.sizeToFit()
+                loginBtn.frame.origin = NSPoint(x: padL, y: label.frame.maxY + 2)
+                h += loginBtn.frame.height + 6
+                w = max(w, loginBtn.frame.width + padL + padR)
             }
         }
         panel?.needsDisplay = true

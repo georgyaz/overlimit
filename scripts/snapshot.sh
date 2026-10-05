@@ -16,12 +16,27 @@ mkdir -p "$DIR"
 VER=$("$HOME/.local/bin/claude" --version 2>/dev/null | awk '{print $1}')
 [ -z "$VER" ] && VER="2.1.223"
 
+# Status file for the panel: ok | auth_required | auth_soon:<days>.
+# The refresh token has a hard 30-day life from login; nothing extends it.
+# Warn three days ahead so the monthly sign-in is planned, not a surprise.
+STATUS="$DIR/status"
+DAYS_LEFT=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | python3 -c '
+import json,sys,time
+try:
+    o=json.load(sys.stdin).get("claudeAiOauth",{})
+    rte=o.get("refreshTokenExpiresAt")
+    print(int((rte/1000-time.time())//86400) if rte else 99)
+except Exception:
+    print(99)')
+
 TOKEN=$(python3 "$DIR/token.py" 2>>"$ERR")
 
 if [ -z "${TOKEN:-}" ]; then
   echo "$(date -u +%FT%TZ) no_token" >> "$ERR"
+  echo "auth_required" > "$STATUS"
   exit 1
 fi
+if [ "${DAYS_LEFT:-99}" -le 3 ]; then echo "auth_soon:$DAYS_LEFT" > "$STATUS"; else echo "ok" > "$STATUS"; fi
 
 RESP=$(curl -s -m 20 -w $'\n%{http_code}' "https://api.anthropic.com/api/oauth/usage" \
   -H "Authorization: Bearer $TOKEN" \
