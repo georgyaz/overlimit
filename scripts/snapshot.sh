@@ -2,6 +2,10 @@
 # snapshot.sh - snapshots Claude usage limits into a CSV. Run by launchd every 5 min.
 # Installed copy: ~/.overlimit/snapshot.sh
 set -uo pipefail
+# After an Xcode update, /usr/bin/python3, git and swiftc refuse to run until
+# the new licence is accepted with sudo. Command Line Tools ship the same
+# tools without that gate, so prefer them when present.
+[ -d /Library/Developer/CommandLineTools ] && export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 
 DIR="$HOME/.overlimit"
 # Optional retention policy: KEEP_DAYS=0 keeps only the latest snapshot and
@@ -28,6 +32,14 @@ try:
     print(int((rte/1000-time.time())//86400) if rte else 99)
 except Exception:
     print(99)')
+
+# If python3 itself cannot start, the token is not the problem: say so instead
+# of "sign-in required", which sent the user through a sign-in that changed nothing.
+if ! python3 -c "" 2>/dev/null; then
+  echo "$(date -u +%FT%TZ) python3_unavailable" >> "$ERR"
+  echo "tools_blocked" > "$STATUS"
+  exit 1
+fi
 
 TOKEN=$(python3 "$DIR/token.py" 2>>"$ERR")
 

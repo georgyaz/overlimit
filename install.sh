@@ -1,6 +1,10 @@
 #!/bin/bash
 # Overlimit — installer. Builds the app, installs launchd agents, starts everything.
 set -euo pipefail
+# After an Xcode update, /usr/bin/python3, git and swiftc refuse to run until
+# the new licence is accepted with sudo. Command Line Tools ship the same
+# tools without that gate, so prefer them when present.
+[ -d /Library/Developer/CommandLineTools ] && export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 DIR="$HOME/.overlimit"
