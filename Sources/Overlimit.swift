@@ -145,10 +145,10 @@ func weeklyText(_ tag: String, _ s: Sample, _ b: Budget) -> String {
         return fmtRow(tag, s.percent, "", "\(L("сброс","reset")) \(fmtLeft(s.resets))")
     }
     if b.lowRemainder {
-        // Same shape as every other row: the red colour already says "almost out",
-        // and the remainder is just 100 minus the number on the left.
-        let left = String(format: " %@ %2.0f%%", L("ост","left"), b.leftover)
-        return fmtRow(tag, s.percent, left, fmtLeft(s.resets))
+        // Near the end the ceiling stops meaning much; compare against the
+        // limit itself instead, keeping the usual row shape and the reset time.
+        let mid = String(format: " %@ %2.0f%%", relation(s.percent, 100), 100.0)
+        return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
     }
     let mid = String(format: " %@ %2.0f%%", relation(s.percent, b.ceiling), b.ceiling)
     return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
