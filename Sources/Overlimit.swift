@@ -139,16 +139,9 @@ func fmtRow(_ tag: String, _ pct: Double, _ mid: String, _ time: String) -> Stri
 // It is the same for both rows and depends only on time until reset.
 // The sign shows actual versus ceiling: < under, > over, = exactly on pace.
 // ROUNDED values are compared so the sign matches the numbers on screen.
-// Below 10% remaining the ceiling is meaningless - show the remainder instead.
 func weeklyText(_ tag: String, _ s: Sample, _ b: Budget) -> String {
     if s.percent >= 100 {
         return fmtRow(tag, s.percent, "", "\(L("сброс","reset")) \(fmtLeft(s.resets))")
-    }
-    if b.lowRemainder {
-        // Near the end the ceiling stops meaning much; compare against the
-        // limit itself instead, keeping the usual row shape and the reset time.
-        let mid = String(format: " %@ %2.0f%%", relation(s.percent, 100), 100.0)
-        return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
     }
     let mid = String(format: " %@ %2.0f%%", relation(s.percent, b.ceiling), b.ceiling)
     return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
