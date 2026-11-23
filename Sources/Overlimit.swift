@@ -145,8 +145,9 @@ func weeklyText(_ tag: String, _ s: Sample, _ b: Budget) -> String {
         return fmtRow(tag, s.percent, "", "\(L("сброс","reset")) \(fmtLeft(s.resets))")
     }
     if b.lowRemainder {
-        return fmtRow(tag, s.percent, "",
-                      "\(L("ост.","left")) \(String(format: "%.0f", b.leftover))% \(L("на","for")) \(fmtLeft(s.resets))")
+        // Same shape as every other row: the red colour already says "almost out",
+        // and the remainder is just 100 minus the number on the left.
+        return fmtRow(tag, s.percent, "", fmtLeft(s.resets))
     }
     let mid = String(format: " %@ %2.0f%%", relation(s.percent, b.ceiling), b.ceiling)
     return fmtRow(tag, s.percent, mid, fmtLeft(s.resets))
